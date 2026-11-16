@@ -13,228 +13,420 @@ local Lighting = game:GetService("Lighting")
 local Debris = game:GetService("Debris")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
--- Bersihkan semua GUI versi sebelumnya
-local ParentGui = (gethui and gethui()) or game:GetService("CoreGui") or LocalPlayer:WaitForChild("PlayerGui")
+-- ==========================================
+-- 0. VALIDASI INSTANCE, EXECUTOR FALLBACK & CONNECTION MANAGER
+-- ==========================================
+local function isValidInstance(inst)
+	return typeof(inst) == "Instance" and inst.Parent ~= nil
+end
+
+-- Poin #9: Wrapper Kompatibilitas Executor dengan pcall & Fallback Aman
+local ExecutorSafe = {}
+
+function ExecutorSafe.getGuiParent()
+	if typeof(gethui) == "function" then
+		local ok, res = pcall(gethui)
+		if ok and typeof(res) == "Instance" then
+			return res
+		end
+	end
+	local okCore, coreGui = pcall(function()
+		return game:GetService("CoreGui")
+	end)
+	if okCore and typeof(coreGui) == "Instance" then
+		return coreGui
+	end
+	return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+function ExecutorSafe.fireSignal(signal, ...)
+	if not signal then return false end
+	local args = { ... }
+
+	if typeof(firesignal) == "function" then
+		local ok = pcall(function()
+			firesignal(signal, table.unpack(args))
+		end)
+		if ok then return true end
+	end
+
+	if typeof(getconnections) == "function" then
+		local ok, list = pcall(getconnections, signal)
+		if ok and type(list) == "table" then
+			for _, conn in ipairs(list) do
+				pcall(function()
+					if conn.Fire then
+						conn:Fire(table.unpack(args))
+					elseif conn.Function then
+						task.spawn(conn.Function, table.unpack(args))
+					end
+				end)
+			end
+			return true
+		end
+	end
+
+	return false
+end
+
+function ExecutorSafe.fireProximityPrompt(prompt)
+	if not isValidInstance(prompt) or not prompt.Enabled then return false end
+	if typeof(fireproximityprompt) == "function" then
+		local ok = pcall(fireproximityprompt, prompt)
+		if ok then return true end
+	end
+	pcall(function()
+		prompt:InputHoldBegin()
+		task.delay(math.max(0.05, prompt.HoldDuration or 0), function()
+			if isValidInstance(prompt) then
+				pcall(function() prompt:InputHoldEnd() end)
+			end
+		end)
+	end)
+	return true
+end
+
+function ExecutorSafe.fireTouchInterest(toucher, targetPart)
+	if not isValidInstance(toucher) or not isValidInstance(targetPart) then return false end
+	if typeof(firetouchinterest) == "function" then
+		local ok = pcall(function()
+			firetouchinterest(toucher, targetPart, 0)
+			firetouchinterest(toucher, targetPart, 1)
+		end)
+		return ok
+	end
+	return false
+end
+
+function ExecutorSafe.fireClickDetector(cd)
+	if not isValidInstance(cd) then return false end
+	if typeof(fireclickdetector) == "function" then
+		local ok = pcall(fireclickdetector, cd)
+		return ok
+	end
+	return false
+end
+
+function ExecutorSafe.sendKeyEvent(isDown, keyCode)
+	if not VirtualInputManager then return false end
+	return pcall(function()
+		VirtualInputManager:SendKeyEvent(isDown, keyCode, false, game)
+	end)
+end
+
+function ExecutorSafe.sendMouseClick(x, y)
+	if not VirtualInputManager then return false end
+	return pcall(function()
+		VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+		task.wait(0.02)
+		VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+	end)
+end
+
+-- Poin #2 & #10: Sistem Cleanup Koneksi & Thread Lifecycle Manager
+local ConnectionRegistry = {
+	Global = {},
+	Character = {}
+}
+
+local ActiveThreads = {}
+
+local function registerConnection(bucket, key, conn)
+	if not conn then return nil end
+	if key then
+		local existing = bucket[key]
+		if existing and typeof(existing) == "RBXScriptConnection" and existing.Connected then
+			pcall(function() existing:Disconnect() end)
+		end
+		bucket[key] = conn
+	else
+		table.insert(bucket, conn)
+	end
+	return conn
+end
+
+local function addGlobalConn(conn, key)
+	return registerConnection(ConnectionRegistry.Global, key, conn)
+end
+
+local function addCharConn(conn, key)
+	return registerConnection(ConnectionRegistry.Character, key, conn)
+end
+
+local function disconnectBucket(bucket)
+	for k, conn in pairs(bucket) do
+		if typeof(conn) == "RBXScriptConnection" and conn.Connected then
+			pcall(function() conn:Disconnect() end)
+		end
+		bucket[k] = nil
+	end
+end
+
+local function cleanupCharacterConnections()
+	disconnectBucket(ConnectionRegistry.Character)
+end
+
+local function cleanupAllConnections()
+	cleanupCharacterConnections()
+	disconnectBucket(ConnectionRegistry.Global)
+	for i = #ActiveThreads, 1, -1 do
+		local th = ActiveThreads[i]
+		if typeof(th) == "thread" and coroutine.status(th) == "suspended" then
+			pcall(task.cancel, th)
+		end
+		ActiveThreads[i] = nil
+	end
+end
+
+local function spawnManagedThread(fn)
+	local th = task.spawn(fn)
+	table.insert(ActiveThreads, th)
+	return th
+end
+
+-- Bersihkan semua GUI & objek versi sebelumnya
+local ParentGui = ExecutorSafe.getGuiParent()
 for _, oldName in ipairs({
-    "ModernEggHub",
-    "SecureEggHub",
-    "AnimeClimbEggHub",
-    "AnimeOverdriveV3",
-    "AnimeMasterEggHub",
-    "AnimeOverdriveV4_Ultimate",
-    "AnimeOverdriveV5_Max",
-    "AnimeOverdriveV6_Pro",
-    "AnimeOverdriveV7_RealCarry",
-    "AnimeOverdriveV8_HyperPress"
+	"ModernEggHub",
+	"SecureEggHub",
+	"AnimeClimbEggHub",
+	"AnimeOverdriveV3",
+	"AnimeMasterEggHub",
+	"AnimeOverdriveV4_Ultimate",
+	"AnimeOverdriveV5_Max",
+	"AnimeOverdriveV6_Pro",
+	"AnimeOverdriveV7_RealCarry",
+	"AnimeOverdriveV8_HyperPress"
 }) do
-    if ParentGui:FindFirstChild(oldName) then
-        ParentGui[oldName]:Destroy()
-    end
+	local oldGui = ParentGui:FindFirstChild(oldName)
+	if oldGui then
+		pcall(function() oldGui:Destroy() end)
+	end
+end
+
+local oldPad = Workspace:FindFirstChild("OverdriveV8SafePad")
+if oldPad then
+	pcall(function() oldPad:Destroy() end)
 end
 
 -- ==========================================
 -- 1. TEMA ANIME & 6 ZONA RARITY AREA MAP ASLI
 -- ==========================================
 local Themes = {
-    {
-        Name = "Gojo Infinity (Cyan/Purple)",
-        Primary = Color3.fromRGB(0, 215, 255),
-        Secondary = Color3.fromRGB(145, 70, 255),
-        Bg = Color3.fromRGB(12, 14, 24),
-        Card = Color3.fromRGB(22, 26, 40),
-        Image = "rbxassetid://13702592662"
-    },
-    {
-        Name = "Sukuna Shrine (Crimson/Dark)",
-        Primary = Color3.fromRGB(255, 45, 85),
-        Secondary = Color3.fromRGB(185, 20, 45),
-        Bg = Color3.fromRGB(18, 10, 14),
-        Card = Color3.fromRGB(32, 16, 22),
-        Image = "rbxassetid://12639562957"
-    },
-    {
-        Name = "Solo Shadow (Monarch Violet)",
-        Primary = Color3.fromRGB(175, 85, 255),
-        Secondary = Color3.fromRGB(0, 225, 255),
-        Bg = Color3.fromRGB(12, 10, 22),
-        Card = Color3.fromRGB(24, 18, 38),
-        Image = "rbxassetid://11379207198"
-    },
-    {
-        Name = "Cyber Sakura (Neon Pink)",
-        Primary = Color3.fromRGB(255, 95, 195),
-        Secondary = Color3.fromRGB(0, 230, 255),
-        Bg = Color3.fromRGB(18, 14, 26),
-        Card = Color3.fromRGB(28, 22, 42),
-        Image = "rbxassetid://9067253165"
-    }
+	{
+		Name = "Gojo Infinity (Cyan/Purple)",
+		Primary = Color3.fromRGB(0, 215, 255),
+		Secondary = Color3.fromRGB(145, 70, 255),
+		Bg = Color3.fromRGB(12, 14, 24),
+		Card = Color3.fromRGB(22, 26, 40),
+		Image = "rbxassetid://13702592662"
+	},
+	{
+		Name = "Sukuna Shrine (Crimson/Dark)",
+		Primary = Color3.fromRGB(255, 45, 85),
+		Secondary = Color3.fromRGB(185, 20, 45),
+		Bg = Color3.fromRGB(18, 10, 14),
+		Card = Color3.fromRGB(32, 16, 22),
+		Image = "rbxassetid://12639562957"
+	},
+	{
+		Name = "Solo Shadow (Monarch Violet)",
+		Primary = Color3.fromRGB(175, 85, 255),
+		Secondary = Color3.fromRGB(0, 225, 255),
+		Bg = Color3.fromRGB(12, 10, 22),
+		Card = Color3.fromRGB(24, 18, 38),
+		Image = "rbxassetid://11379207198"
+	},
+	{
+		Name = "Cyber Sakura (Neon Pink)",
+		Primary = Color3.fromRGB(255, 95, 195),
+		Secondary = Color3.fromRGB(0, 230, 255),
+		Bg = Color3.fromRGB(18, 14, 26),
+		Card = Color3.fromRGB(28, 22, 42),
+		Image = "rbxassetid://9067253165"
+	}
 }
 
 local RarityAreas = {
-    {
-        Id = 0,
-        Name = "Semua Area Gunung (All Wild)",
-        ShortName = "ALL WILD",
-        Keywords = {"all"},
-        HeightMin = 0.0,
-        HeightMax = 1.0,
-        Color = Color3.fromRGB(220, 225, 235)
-    },
-    {
-        Id = 1,
-        Name = "Area 1: Common Zone (Dasar)",
-        ShortName = "COMMON AREA",
-        Keywords = {"common", "basic", "starter", "normal", "stage 1", "stage1", "area 1", "area1", "zone 1", "green"},
-        HeightMin = 0.0,
-        HeightMax = 0.20,
-        Color = Color3.fromRGB(120, 240, 130)
-    },
-    {
-        Id = 2,
-        Name = "Area 2: Rare Zone (Menengah Bawah)",
-        ShortName = "RARE AREA",
-        Keywords = {"rare", "uncommon", "silver", "blue", "sapphire", "stage 2", "stage2", "area 2", "area2", "zone 2"},
-        HeightMin = 0.20,
-        HeightMax = 0.42,
-        Color = Color3.fromRGB(0, 190, 255)
-    },
-    {
-        Id = 3,
-        Name = "Area 3: Epic Zone (Tengah Atas)",
-        ShortName = "EPIC AREA",
-        Keywords = {"epic", "crystal", "purple", "amethyst", "demon", "dark", "stage 3", "stage3", "area 3", "area3", "zone 3"},
-        HeightMin = 0.42,
-        HeightMax = 0.65,
-        Color = Color3.fromRGB(190, 85, 255)
-    },
-    {
-        Id = 4,
-        Name = "Area 4: Legendary Zone (Tinggi)",
-        ShortName = "LEGENDARY AREA",
-        Keywords = {"legend", "legendary", "gold", "golden", "royal", "dragon", "king", "lava", "stage 4", "stage4", "area 4", "area4", "zone 4"},
-        HeightMin = 0.65,
-        HeightMax = 0.85,
-        Color = Color3.fromRGB(255, 195, 0)
-    },
-    {
-        Id = 5,
-        Name = "Area 5: Mythic / Secret (Level Final)",
-        ShortName = "MYTHIC FINAL",
-        Keywords = {"mythic", "mythical", "secret", "divine", "god", "celestial", "void", "final", "top", "summit", "heaven", "stage 5", "stage5", "area 5", "area5", "zone 5"},
-        HeightMin = 0.85,
-        HeightMax = 1.0,
-        Color = Color3.fromRGB(255, 45, 95)
-    }
+	{
+		Id = 0,
+		Name = "Semua Area Gunung (All Wild)",
+		ShortName = "ALL WILD",
+		Keywords = {"all"},
+		HeightMin = 0.0,
+		HeightMax = 1.0,
+		Color = Color3.fromRGB(220, 225, 235)
+	},
+	{
+		Id = 1,
+		Name = "Area 1: Common Zone (Dasar)",
+		ShortName = "COMMON AREA",
+		Keywords = {"common", "basic", "starter", "normal", "stage 1", "stage1", "area 1", "area1", "zone 1", "green"},
+		HeightMin = 0.0,
+		HeightMax = 0.20,
+		Color = Color3.fromRGB(120, 240, 130)
+	},
+	{
+		Id = 2,
+		Name = "Area 2: Rare Zone (Menengah Bawah)",
+		ShortName = "RARE AREA",
+		Keywords = {"rare", "uncommon", "silver", "blue", "sapphire", "stage 2", "stage2", "area 2", "area2", "zone 2"},
+		HeightMin = 0.20,
+		HeightMax = 0.42,
+		Color = Color3.fromRGB(0, 190, 255)
+	},
+	{
+		Id = 3,
+		Name = "Area 3: Epic Zone (Tengah Atas)",
+		ShortName = "EPIC AREA",
+		Keywords = {"epic", "crystal", "purple", "amethyst", "demon", "dark", "stage 3", "stage3", "area 3", "area3", "zone 3"},
+		HeightMin = 0.42,
+		HeightMax = 0.65,
+		Color = Color3.fromRGB(190, 85, 255)
+	},
+	{
+		Id = 4,
+		Name = "Area 4: Legendary Zone (Tinggi)",
+		ShortName = "LEGENDARY AREA",
+		Keywords = {"legend", "legendary", "gold", "golden", "royal", "dragon", "king", "lava", "stage 4", "stage4", "area 4", "area4", "zone 4"},
+		HeightMin = 0.65,
+		HeightMax = 0.85,
+		Color = Color3.fromRGB(255, 195, 0)
+	},
+	{
+		Id = 5,
+		Name = "Area 5: Mythic / Secret (Level Final)",
+		ShortName = "MYTHIC FINAL",
+		Keywords = {"mythic", "mythical", "secret", "divine", "god", "celestial", "void", "final", "top", "summit", "heaven", "stage 5", "stage5", "area 5", "area5", "zone 5"},
+		HeightMin = 0.85,
+		HeightMax = 1.0,
+		Color = Color3.fromRGB(255, 45, 95)
+	}
 }
 
 -- ==========================================
 -- 2. KONFIGURASI V8 (6-LAYER HYPER-PRESS ENGINE)
 -- ==========================================
 local Config = {
-    -- Kontrol Utama Auto Steal
-    AutoFarmMove = false,
-    HyperPressAlwaysOn = false,      -- Otomatis pencet semua tombol/egg di dekat kita walau jalan manual
+	-- Kontrol Utama Auto Steal
+	AutoFarmMove = false,
+	HyperPressAlwaysOn = false,
 
-    -- 6-Layer Hyper-Press Settings (Penembus Sistem Pencet Game)
-    AutoAimCameraToEgg = true,       -- Layer 1: Arahkan kamera menghadap telur saat mencet (Wajib agar Prompt aktif)
-    StopMovementWhilePressing = true,-- Layer 2: Berhenti diam total saat mencet agar tidak ke-cancel oleh server
-    AutoTapPlayerGuiButtons = true,  -- Layer 3: Pencet tombol UI di layar HP (ProximityPromptUI & Custom GUI)
-    UseSignalAndPromptAPI = true,    -- Layer 4: Gunakan firesignal + fireproximityprompt + Native Hold
-    SmartRemoteFuzzer = true,        -- Layer 5: Tembak RemoteEvent/Function dengan berbagai kombinasi argumen
-    AutoUnequipTools = true,         -- Layer 6: Lepas item di tangan sebelum mencet agar tangan tidak dianggap penuh
+	-- 6-Layer Hyper-Press Settings
+	AutoAimCameraToEgg = true,
+	StopMovementWhilePressing = true,
+	AutoTapPlayerGuiButtons = true,
+	UseSignalAndPromptAPI = true,
+	SmartRemoteFuzzer = true,
+	AutoUnequipTools = true,
 
-    -- Pengaturan Siklus Ambil & Setor Base
-    WaitUntilEggCarried = true,
-    InstantSnapToBase = true,
-    InstantSnapToEgg = false,
-    HoldBufferTime = 0.25,           -- Tambahan waktu tahan di atas HoldDuration asli server (detik)
-    MaxGrabWaitTime = 3.2,
-    DepositStayTime = 0.8,
+	-- Rate-Limit & Anti-Cheat Protection
+	RemoteSingleDelay = 0.22,        -- Minimal jeda >200ms per tembakan remote (Anti-Error 277)
+	RemoteBatchCooldown = 0.75,      -- Jeda antar siklus batch fuzzing
+	MaxStepTeleportDist = 42,        -- Jarak aman maksimum per langkah CFrame
 
-    -- Filter Anti-Plot Orang Lain
-    IgnoreOtherPlayerPlots = true,
-    PlotSafeRadius = 42,
-    SkipRecentlyVisited = true,
-    OnlyActiveWildEggs = true,
-    EggCooldownSec = 5,
-    CustomKeyword = "egg",
+	-- Pengaturan Siklus Ambil & Setor Base
+	WaitUntilEggCarried = true,
+	InstantSnapToBase = true,
+	InstantSnapToEgg = false,
+	HoldBufferTime = 0.25,
+	MaxGrabWaitTime = 3.2,
+	DepositStayTime = 0.8,
 
-    -- Rarity Area
-    SelectedAreaIndex = 1,
-    AutoStandbyInArea = true,
-    StrictAreaRarityMatch = false,
-    PrioritizeHighestRarity = true,
-    AutoMythicSniper = true,
+	-- Filter Anti-Plot Orang Lain
+	IgnoreOtherPlayerPlots = true,
+	PlotSafeRadius = 34,             -- Diperketat agar tidak men-skip telur liar di dekat jalan
+	SkipRecentlyVisited = true,
+	OnlyActiveWildEggs = true,
+	EggCooldownSec = 5,
+	CustomKeyword = "egg",
 
-    -- Kecepatan & Fisika
-    GlideSpeed = 95,
-    SpeedBoost = false,
-    WalkSpeed = 75,
-    HighJump = false,
-    JumpPower = 110,
-    InfJump = false,
-    AirWalkFloat = false,
-    Noclip = false,
+	-- Rarity Area
+	SelectedAreaIndex = 1,
+	AutoStandbyInArea = true,
+	StrictAreaRarityMatch = false,
+	PrioritizeHighestRarity = true,
+	AutoMythicSniper = true,
 
-    -- Visual & Pengaman
-    ESP = false,
-    Fullbright = false,
-    UnlockMaxZoom = false,
-    RemoveKillBricks = false,
-    VelocityBypass = true,
-    FloatPadBypass = true,
-    AntiAdmin = true,
-    AntiVoid = true,
-    AntiAFK = true,
-    ThemeIndex = 1,
-    ParticlesEnabled = true,
+	-- Kecepatan & Fisika
+	GlideSpeed = 95,
+	SpeedBoost = false,
+	WalkSpeed = 75,
+	HighJump = false,
+	JumpPower = 110,
+	InfJump = false,
+	AirWalkFloat = false,
+	Noclip = false,
 
-    -- Koordinat
-    BaseCFrame = nil,
-    DepositPadCFrame = nil,
-    CustomStandbyCFrame = nil
+	-- Visual & Pengaman
+	ESP = false,
+	Fullbright = false,
+	UnlockMaxZoom = false,
+	RemoveKillBricks = false,
+	VelocityBypass = true,
+	FloatPadBypass = true,
+	AntiAdmin = true,
+	AntiVoid = true,
+	AntiAFK = true,
+	ThemeIndex = 1,
+	ParticlesEnabled = true,
+
+	-- Koordinat
+	BaseCFrame = nil,
+	DepositPadCFrame = nil,
+	CustomStandbyCFrame = nil
 }
 
 local State = {
-    IsGliding = false,
-    IsPressingEgg = false, -- Saat true, karakter dikunci diam agar proses pencet tidak batal!
-    CancelGlide = false,
-    AdminDetected = false,
-    CollectedCount = 0,
-    CycleCount = 0,
-    ActivePromptShown = nil,
-    LastTriggerMethod = "Standby",
-    AirWalkY = nil,
-    MapMinY = 0,
-    MapMaxY = 600,
-    ZoneCheckpoints = {},
-    PlotCenters = {},
-    PlotModels = {},
-    EggCache = {},
-    VisitedEggs = {},
-    EggRemotes = {},
-    PromptOrigHold = {},
-    OriginalCollide = {},
-    DefaultLighting = {
-        Brightness = Lighting.Brightness,
-        ClockTime = Lighting.ClockTime,
-        FogEnd = Lighting.FogEnd,
-        GlobalShadows = Lighting.GlobalShadows
-    }
+	ScriptAlive = true,
+	IsGliding = false,
+	IsPressingEgg = false,
+	CancelGlide = false,
+	IsFuzzingRemotes = false,
+	LastRemoteFuzzTick = 0,
+	LastUITapTick = 0,
+	ActiveTween = nil,
+	AdminDetected = false,
+	CollectedCount = 0,
+	CycleCount = 0,
+	ActivePromptShown = nil,
+	LastTriggerMethod = "Standby",
+	AirWalkY = nil,
+	MapMinY = 0,
+	MapMaxY = 600,
+	ZoneCheckpoints = {},
+	PlotCenters = {},
+	PlotModels = {},
+	EggCache = {},
+	VisitedEggs = {},
+	EggRemotes = {},
+	PromptOrigHold = {},
+	OriginalCollide = {},
+	StarterToolNames = {},
+	TrackedCandidates = {},
+	TrackedPrompts = {},
+	TrackedDepositPads = {},
+	DefaultLighting = {
+		Brightness = Lighting.Brightness,
+		ClockTime = Lighting.ClockTime,
+		FogEnd = Lighting.FogEnd,
+		GlobalShadows = Lighting.GlobalShadows
+	}
 }
 
--- Tangkap setiap ProximityPrompt yang muncul di layar secara real-time
-ProximityPromptService.PromptShown:Connect(function(prompt)
-    State.ActivePromptShown = prompt
-end)
-ProximityPromptService.PromptHidden:Connect(function(prompt)
-    if State.ActivePromptShown == prompt then
-        State.ActivePromptShown = nil
-    end
-end)
+addGlobalConn(ProximityPromptService.PromptShown:Connect(function(prompt)
+	State.ActivePromptShown = prompt
+end), "PromptShown")
+
+addGlobalConn(ProximityPromptService.PromptHidden:Connect(function(prompt)
+	if State.ActivePromptShown == prompt then
+		State.ActivePromptShown = nil
+	end
+end), "PromptHidden")
 
 -- ==========================================
 -- 3. PEMBUATAN GUI ANIME OVERDRIVE V8
@@ -245,34 +437,64 @@ ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = ParentGui
 
-local function makeDraggable(trigger, frameToMove)
-    local dragging, dragInput, dragStart, startPos
-    trigger.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = frameToMove.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
-            end)
-        end
-    end)
-    trigger.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-            dragInput = input
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if input == dragInput and dragging then
-            local delta = input.Position - dragStart
-            frameToMove.Position = UDim2.new(
-                startPos.X.Scale, startPos.X.Offset + delta.X,
-                startPos.Y.Scale, startPos.Y.Offset + delta.Y
-            )
-        end
-    end)
+local SafePad = Instance.new("Part")
+SafePad.Name = "OverdriveV8SafePad"
+SafePad.Size = Vector3.new(8, 1, 8)
+SafePad.Transparency = 1
+SafePad.Anchored = true
+SafePad.CanCollide = false
+SafePad.Parent = Workspace
+
+addGlobalConn(ScreenGui.Destroying:Connect(function()
+	State.ScriptAlive = false
+	State.CancelGlide = true
+	State.IsGliding = false
+	State.IsPressingEgg = false
+	if State.ActiveTween then
+		pcall(function() State.ActiveTween:Cancel() end)
+		State.ActiveTween = nil
+	end
+	cleanupAllConnections()
+	if isValidInstance(SafePad) then
+		pcall(function() SafePad:Destroy() end)
+	end
+end), "GuiDestroying")
+
+local function makeDraggable(trigger, frameToMove, keyPrefix)
+	local dragging = false
+	local dragInput = nil
+	local dragStart = nil
+	local startPos = nil
+
+	addGlobalConn(trigger.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = frameToMove.Position
+		end
+	end), keyPrefix .. "_InBegan")
+
+	addGlobalConn(trigger.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			dragInput = input
+		end
+	end), keyPrefix .. "_InChanged")
+
+	addGlobalConn(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end), keyPrefix .. "_InEnded")
+
+	addGlobalConn(UserInputService.InputChanged:Connect(function(input)
+		if input == dragInput and dragging and dragStart and startPos and isValidInstance(frameToMove) then
+			local delta = input.Position - dragStart
+			frameToMove.Position = UDim2.new(
+				startPos.X.Scale, startPos.X.Offset + delta.X,
+				startPos.Y.Scale, startPos.Y.Offset + delta.Y
+			)
+		end
+	end), keyPrefix .. "_UISChanged")
 end
 
 -- Kontainer Notifikasi Pop-Up
@@ -286,43 +508,50 @@ NotifyLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
 NotifyLayout.Padding = UDim.new(0, 6)
 
 local function sendNotification(titleText, bodyText, duration)
-    task.spawn(function()
-        local curTheme = Themes[Config.ThemeIndex]
-        local Card = Instance.new("Frame", NotifyContainer)
-        Card.BackgroundColor3 = curTheme.Card
-        Card.BackgroundTransparency = 0.08
-        Card.Size = UDim2.new(1, 0, 0, 50)
-        Instance.new("UICorner", Card).CornerRadius = UDim.new(0, 8)
+	if not State.ScriptAlive or not isValidInstance(NotifyContainer) then return end
+	spawnManagedThread(function()
+		local curTheme = Themes[Config.ThemeIndex] or Themes[1]
+		local Card = Instance.new("Frame", NotifyContainer)
+		Card.BackgroundColor3 = curTheme.Card
+		Card.BackgroundTransparency = 0.08
+		Card.Size = UDim2.new(1, 0, 0, 50)
+		Instance.new("UICorner", Card).CornerRadius = UDim.new(0, 8)
 
-        local CardStroke = Instance.new("UIStroke", Card)
-        CardStroke.Color = curTheme.Primary
-        CardStroke.Thickness = 1.6
+		local CardStroke = Instance.new("UIStroke", Card)
+		CardStroke.Color = curTheme.Primary
+		CardStroke.Thickness = 1.6
 
-        local T1 = Instance.new("TextLabel", Card)
-        T1.BackgroundTransparency = 1
-        T1.Position = UDim2.new(0, 10, 0, 4)
-        T1.Size = UDim2.new(1, -20, 0, 18)
-        T1.Font = Enum.Font.GothamBlack
-        T1.Text = titleText
-        T1.TextColor3 = curTheme.Primary
-        T1.TextSize = 11
-        T1.TextXAlignment = Enum.TextXAlignment.Left
+		local T1 = Instance.new("TextLabel", Card)
+		T1.BackgroundTransparency = 1
+		T1.Position = UDim2.new(0, 10, 0, 4)
+		T1.Size = UDim2.new(1, -20, 0, 18)
+		T1.Font = Enum.Font.GothamBlack
+		T1.Text = tostring(titleText or "Info")
+		T1.TextColor3 = curTheme.Primary
+		T1.TextSize = 11
+		T1.TextXAlignment = Enum.TextXAlignment.Left
 
-        local T2 = Instance.new("TextLabel", Card)
-        T2.BackgroundTransparency = 1
-        T2.Position = UDim2.new(0, 10, 0, 22)
-        T2.Size = UDim2.new(1, -20, 0, 22)
-        T2.Font = Enum.Font.GothamMedium
-        T2.Text = bodyText
-        T2.TextColor3 = Color3.fromRGB(235, 240, 250)
-        T2.TextSize = 10
-        T2.TextXAlignment = Enum.TextXAlignment.Left
+		local T2 = Instance.new("TextLabel", Card)
+		T2.BackgroundTransparency = 1
+		T2.Position = UDim2.new(0, 10, 0, 22)
+		T2.Size = UDim2.new(1, -20, 0, 22)
+		T2.Font = Enum.Font.GothamMedium
+		T2.Text = tostring(bodyText or "")
+		T2.TextColor3 = Color3.fromRGB(235, 240, 250)
+		T2.TextSize = 10
+		T2.TextXAlignment = Enum.TextXAlignment.Left
 
-        task.wait(duration or 2.6)
-        TweenService:Create(Card, TweenInfo.new(0.25), {BackgroundTransparency = 1}):Play()
-        task.wait(0.25)
-        Card:Destroy()
-    end)
+		task.wait(duration or 2.6)
+		if isValidInstance(Card) then
+			pcall(function()
+				TweenService:Create(Card, TweenInfo.new(0.25), {BackgroundTransparency = 1}):Play()
+			end)
+			task.wait(0.25)
+			if isValidInstance(Card) then
+				pcall(function() Card:Destroy() end)
+			end
+		end
+	end)
 end
 
 -- Tombol Orb Mengambang Saat Minimize
@@ -340,7 +569,7 @@ Instance.new("UICorner", FloatOrb).CornerRadius = UDim.new(1, 0)
 local OrbStroke = Instance.new("UIStroke", FloatOrb)
 OrbStroke.Color = Themes[1].Primary
 OrbStroke.Thickness = 2.5
-makeDraggable(FloatOrb, FloatOrb)
+makeDraggable(FloatOrb, FloatOrb, "DragOrb")
 
 -- Frame Utama GUI
 local MainFrame = Instance.new("Frame", ScreenGui)
@@ -356,18 +585,18 @@ MainStroke.Color = Color3.fromRGB(255, 255, 255)
 
 local MainGrad = Instance.new("UIGradient", MainStroke)
 MainGrad.Color = ColorSequence.new({
-    ColorSequenceKeypoint.new(0, Themes[1].Primary),
-    ColorSequenceKeypoint.new(0.5, Themes[1].Secondary),
-    ColorSequenceKeypoint.new(1, Themes[1].Primary)
+	ColorSequenceKeypoint.new(0, Themes[1].Primary),
+	ColorSequenceKeypoint.new(0.5, Themes[1].Secondary),
+	ColorSequenceKeypoint.new(1, Themes[1].Primary)
 })
 
-task.spawn(function()
-    local rot = 0
-    while MainFrame.Parent do
-        rot = (rot + 2) % 360
-        MainGrad.Rotation = rot
-        task.wait(0.03)
-    end
+spawnManagedThread(function()
+	local rot = 0
+	while State.ScriptAlive and isValidInstance(MainFrame) and isValidInstance(MainGrad) do
+		rot = (rot + 2) % 360
+		MainGrad.Rotation = rot
+		task.wait(0.04)
+	end
 end)
 
 local WallpaperImg = Instance.new("ImageLabel", MainFrame)
@@ -391,7 +620,7 @@ Header.BackgroundColor3 = Themes[1].Card
 Header.BackgroundTransparency = 0.12
 Header.Size = UDim2.new(1, 0, 0, 50)
 Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 14)
-makeDraggable(Header, MainFrame)
+makeDraggable(Header, MainFrame, "DragMain")
 
 local TitleLabel = Instance.new("TextLabel", Header)
 TitleLabel.BackgroundTransparency = 1
@@ -449,45 +678,47 @@ local Pages = {}
 local TabButtons = {}
 
 local function createTab(tabName)
-    local Btn = Instance.new("TextButton", Sidebar)
-    Btn.Size = UDim2.new(0.92, 0, 0, 34)
-    Btn.BackgroundColor3 = Color3.fromRGB(32, 36, 54)
-    Btn.BackgroundTransparency = 0.2
-    Btn.Font = Enum.Font.GothamBold
-    Btn.Text = tabName
-    Btn.TextColor3 = Color3.fromRGB(195, 200, 220)
-    Btn.TextSize = 10
-    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 7)
+	local Btn = Instance.new("TextButton", Sidebar)
+	Btn.Size = UDim2.new(0.92, 0, 0, 34)
+	Btn.BackgroundColor3 = Color3.fromRGB(32, 36, 54)
+	Btn.BackgroundTransparency = 0.2
+	Btn.Font = Enum.Font.GothamBold
+	Btn.Text = tabName
+	Btn.TextColor3 = Color3.fromRGB(195, 200, 220)
+	Btn.TextSize = 10
+	Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 7)
 
-    local Page = Instance.new("ScrollingFrame", PageHolder)
-    Page.Size = UDim2.new(1, 0, 1, 0)
-    Page.BackgroundTransparency = 1
-    Page.ScrollBarThickness = 3
-    Page.ScrollBarImageColor3 = Themes[1].Primary
-    Page.BorderSizePixel = 0
-    Page.Visible = false
+	local Page = Instance.new("ScrollingFrame", PageHolder)
+	Page.Size = UDim2.new(1, 0, 1, 0)
+	Page.BackgroundTransparency = 1
+	Page.ScrollBarThickness = 3
+	Page.ScrollBarImageColor3 = Themes[1].Primary
+	Page.BorderSizePixel = 0
+	Page.Visible = false
 
-    local Layout = Instance.new("UIListLayout", Page)
-    Layout.Padding = UDim.new(0, 6)
-    Layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-    Layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-        Page.CanvasSize = UDim2.new(0, 0, 0, Layout.AbsoluteContentSize.Y + 16)
-    end)
+	local Layout = Instance.new("UIListLayout", Page)
+	Layout.Padding = UDim.new(0, 6)
+	Layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	addGlobalConn(Layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		if isValidInstance(Page) and isValidInstance(Layout) then
+			Page.CanvasSize = UDim2.new(0, 0, 0, Layout.AbsoluteContentSize.Y + 16)
+		end
+	end))
 
-    Btn.MouseButton1Click:Connect(function()
-        for _, p in ipairs(Pages) do p.Visible = false end
-        for _, b in ipairs(TabButtons) do
-            b.BackgroundColor3 = Color3.fromRGB(32, 36, 54)
-            b.TextColor3 = Color3.fromRGB(195, 200, 220)
-        end
-        Page.Visible = true
-        Btn.BackgroundColor3 = Themes[Config.ThemeIndex].Primary
-        Btn.TextColor3 = Color3.fromRGB(15, 15, 20)
-    end)
+	addGlobalConn(Btn.MouseButton1Click:Connect(function()
+		for _, p in ipairs(Pages) do p.Visible = false end
+		for _, b in ipairs(TabButtons) do
+			b.BackgroundColor3 = Color3.fromRGB(32, 36, 54)
+			b.TextColor3 = Color3.fromRGB(195, 200, 220)
+		end
+		Page.Visible = true
+		Btn.BackgroundColor3 = Themes[Config.ThemeIndex].Primary
+		Btn.TextColor3 = Color3.fromRGB(15, 15, 20)
+	end))
 
-    table.insert(Pages, Page)
-    table.insert(TabButtons, Btn)
-    return Page
+	table.insert(Pages, Page)
+	table.insert(TabButtons, Btn)
+	return Page
 end
 
 local TabHyperPress = createTab("1. Hyper-Press")
@@ -505,970 +736,1263 @@ TabButtons[1].TextColor3 = Color3.fromRGB(15, 15, 20)
 -- 4. KOMPONEN UI BUILDER
 -- ==========================================
 local function addSectionHeader(page, titleText)
-    local Lbl = Instance.new("TextLabel", page)
-    Lbl.BackgroundTransparency = 1
-    Lbl.Size = UDim2.new(0.96, 0, 0, 18)
-    Lbl.Font = Enum.Font.GothamBlack
-    Lbl.Text = "◆ " .. string.upper(titleText)
-    Lbl.TextColor3 = Themes[Config.ThemeIndex].Primary
-    Lbl.TextSize = 10
-    Lbl.TextXAlignment = Enum.TextXAlignment.Left
-    return Lbl
+	local Lbl = Instance.new("TextLabel", page)
+	Lbl.BackgroundTransparency = 1
+	Lbl.Size = UDim2.new(0.96, 0, 0, 18)
+	Lbl.Font = Enum.Font.GothamBlack
+	Lbl.Text = "◆ " .. string.upper(titleText)
+	Lbl.TextColor3 = Themes[Config.ThemeIndex].Primary
+	Lbl.TextSize = 10
+	Lbl.TextXAlignment = Enum.TextXAlignment.Left
+	return Lbl
 end
 
 local function addToggle(page, labelText, defaultVal, callback)
-    local Row = Instance.new("Frame", page)
-    Row.BackgroundColor3 = Themes[1].Card
-    Row.BackgroundTransparency = 0.14
-    Row.Size = UDim2.new(0.97, 0, 0, 35)
-    Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 8)
+	local Row = Instance.new("Frame", page)
+	Row.BackgroundColor3 = Themes[1].Card
+	Row.BackgroundTransparency = 0.14
+	Row.Size = UDim2.new(0.97, 0, 0, 35)
+	Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 8)
 
-    local Txt = Instance.new("TextLabel", Row)
-    Txt.BackgroundTransparency = 1
-    Txt.Position = UDim2.new(0, 10, 0, 0)
-    Txt.Size = UDim2.new(0.74, 0, 1, 0)
-    Txt.Font = Enum.Font.GothamSemibold
-    Txt.Text = labelText
-    Txt.TextColor3 = Color3.fromRGB(240, 240, 250)
-    Txt.TextSize = 11
-    Txt.TextXAlignment = Enum.TextXAlignment.Left
+	local Txt = Instance.new("TextLabel", Row)
+	Txt.BackgroundTransparency = 1
+	Txt.Position = UDim2.new(0, 10, 0, 0)
+	Txt.Size = UDim2.new(0.74, 0, 1, 0)
+	Txt.Font = Enum.Font.GothamSemibold
+	Txt.Text = labelText
+	Txt.TextColor3 = Color3.fromRGB(240, 240, 250)
+	Txt.TextSize = 11
+	Txt.TextXAlignment = Enum.TextXAlignment.Left
 
-    local Switch = Instance.new("TextButton", Row)
-    Switch.Position = UDim2.new(1, -46, 0.5, -10)
-    Switch.Size = UDim2.new(0, 38, 0, 20)
-    Switch.Text = ""
-    Instance.new("UICorner", Switch).CornerRadius = UDim.new(1, 0)
+	local Switch = Instance.new("TextButton", Row)
+	Switch.Position = UDim2.new(1, -46, 0.5, -10)
+	Switch.Size = UDim2.new(0, 38, 0, 20)
+	Switch.Text = ""
+	Instance.new("UICorner", Switch).CornerRadius = UDim.new(1, 0)
 
-    local Dot = Instance.new("Frame", Switch)
-    Dot.Size = UDim2.new(0, 14, 0, 14)
-    Dot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    Instance.new("UICorner", Dot).CornerRadius = UDim.new(1, 0)
+	local Dot = Instance.new("Frame", Switch)
+	Dot.Size = UDim2.new(0, 14, 0, 14)
+	Dot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	Instance.new("UICorner", Dot).CornerRadius = UDim.new(1, 0)
 
-    local state = defaultVal
-    local function updateLook()
-        Switch.BackgroundColor3 = state and Themes[Config.ThemeIndex].Primary or Color3.fromRGB(52, 58, 78)
-        TweenService:Create(Dot, TweenInfo.new(0.15), {
-            Position = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
-        }):Play()
-    end
-    updateLook()
+	local state = defaultVal
+	local function updateLook()
+		Switch.BackgroundColor3 = state and Themes[Config.ThemeIndex].Primary or Color3.fromRGB(52, 58, 78)
+		TweenService:Create(Dot, TweenInfo.new(0.15), {
+			Position = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+		}):Play()
+	end
+	updateLook()
 
-    Switch.MouseButton1Click:Connect(function()
-        state = not state
-        updateLook()
-        callback(state)
-    end)
+	addGlobalConn(Switch.MouseButton1Click:Connect(function()
+		state = not state
+		updateLook()
+		callback(state)
+	end))
 end
 
 local function addSlider(page, labelText, minVal, maxVal, defaultVal, callback)
-    local Card = Instance.new("Frame", page)
-    Card.BackgroundColor3 = Themes[1].Card
-    Card.BackgroundTransparency = 0.14
-    Card.Size = UDim2.new(0.97, 0, 0, 46)
-    Instance.new("UICorner", Card).CornerRadius = UDim.new(0, 8)
+	local Card = Instance.new("Frame", page)
+	Card.BackgroundColor3 = Themes[1].Card
+	Card.BackgroundTransparency = 0.14
+	Card.Size = UDim2.new(0.97, 0, 0, 46)
+	Instance.new("UICorner", Card).CornerRadius = UDim.new(0, 8)
 
-    local Title = Instance.new("TextLabel", Card)
-    Title.BackgroundTransparency = 1
-    Title.Position = UDim2.new(0, 10, 0, 4)
-    Title.Size = UDim2.new(1, -20, 0, 16)
-    Title.Font = Enum.Font.GothamSemibold
-    Title.Text = labelText .. ": " .. tostring(defaultVal)
-    Title.TextColor3 = Color3.fromRGB(240, 240, 250)
-    Title.TextSize = 11
-    Title.TextXAlignment = Enum.TextXAlignment.Left
+	local Title = Instance.new("TextLabel", Card)
+	Title.BackgroundTransparency = 1
+	Title.Position = UDim2.new(0, 10, 0, 4)
+	Title.Size = UDim2.new(1, -20, 0, 16)
+	Title.Font = Enum.Font.GothamSemibold
+	Title.Text = labelText .. ": " .. tostring(defaultVal)
+	Title.TextColor3 = Color3.fromRGB(240, 240, 250)
+	Title.TextSize = 11
+	Title.TextXAlignment = Enum.TextXAlignment.Left
 
-    local Track = Instance.new("Frame", Card)
-    Track.BackgroundColor3 = Color3.fromRGB(45, 50, 72)
-    Track.Position = UDim2.new(0, 10, 0, 26)
-    Track.Size = UDim2.new(1, -20, 0, 10)
-    Instance.new("UICorner", Track).CornerRadius = UDim.new(1, 0)
+	local Track = Instance.new("Frame", Card)
+	Track.BackgroundColor3 = Color3.fromRGB(45, 50, 72)
+	Track.Position = UDim2.new(0, 10, 0, 26)
+	Track.Size = UDim2.new(1, -20, 0, 10)
+	Instance.new("UICorner", Track).CornerRadius = UDim.new(1, 0)
 
-    local Fill = Instance.new("Frame", Track)
-    Fill.BackgroundColor3 = Themes[1].Primary
-    Fill.Size = UDim2.new((defaultVal - minVal) / (maxVal - minVal), 0, 1, 0)
-    Instance.new("UICorner", Fill).CornerRadius = UDim.new(1, 0)
+	local Fill = Instance.new("Frame", Track)
+	Fill.BackgroundColor3 = Themes[1].Primary
+	Fill.Size = UDim2.new((defaultVal - minVal) / (maxVal - minVal), 0, 1, 0)
+	Instance.new("UICorner", Fill).CornerRadius = UDim.new(1, 0)
 
-    local sliding = false
-    local function updateFromInput(input)
-        local ratio = math.clamp((input.Position.X - Track.AbsolutePosition.X) / Track.AbsoluteSize.X, 0, 1)
-        local value = math.floor(minVal + (maxVal - minVal) * ratio)
-        Fill.Size = UDim2.new(ratio, 0, 1, 0)
-        Fill.BackgroundColor3 = Themes[Config.ThemeIndex].Primary
-        Title.Text = labelText .. ": " .. tostring(value)
-        callback(value)
-    end
+	local sliding = false
+	local function updateFromInput(input)
+		if not isValidInstance(Track) or Track.AbsoluteSize.X <= 2 then return end
+		local ratio = math.clamp((input.Position.X - Track.AbsolutePosition.X) / Track.AbsoluteSize.X, 0, 1)
+		local value = math.floor(minVal + (maxVal - minVal) * ratio)
+		Fill.Size = UDim2.new(ratio, 0, 1, 0)
+		Fill.BackgroundColor3 = Themes[Config.ThemeIndex].Primary
+		Title.Text = labelText .. ": " .. tostring(value)
+		callback(value)
+	end
 
-    Track.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            sliding = true
-            updateFromInput(input)
-        end
-    end)
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            sliding = false
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            updateFromInput(input)
-        end
-    end)
+	addGlobalConn(Track.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			sliding = true
+			updateFromInput(input)
+		end
+	end))
+	addGlobalConn(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			sliding = false
+		end
+	end))
+	addGlobalConn(UserInputService.InputChanged:Connect(function(input)
+		if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			updateFromInput(input)
+		end
+	end))
 end
 
 local function addButton(page, btnText, customColor, callback)
-    local Btn = Instance.new("TextButton", page)
-    Btn.BackgroundColor3 = customColor or Themes[1].Secondary
-    Btn.BackgroundTransparency = 0.1
-    Btn.Size = UDim2.new(0.97, 0, 0, 33)
-    Btn.Font = Enum.Font.GothamBold
-    Btn.Text = btnText
-    Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    Btn.TextSize = 11
-    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 8)
-    Btn.MouseButton1Click:Connect(function()
-        callback(Btn)
-    end)
-    return Btn
+	local Btn = Instance.new("TextButton", page)
+	Btn.BackgroundColor3 = customColor or Themes[1].Secondary
+	Btn.BackgroundTransparency = 0.1
+	Btn.Size = UDim2.new(0.97, 0, 0, 33)
+	Btn.Font = Enum.Font.GothamBold
+	Btn.Text = btnText
+	Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	Btn.TextSize = 11
+	Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 8)
+	addGlobalConn(Btn.MouseButton1Click:Connect(function()
+		callback(Btn)
+	end))
+	return Btn
 end
 
 -- ==========================================
 -- 5. ENGINE PENEMBUS SISTEM PENCET GAME (6-LAYER HYPER-PRESS)
 -- ==========================================
 local function getPart(obj)
-    if not obj then return nil end
-    if obj:IsA("BasePart") then return obj end
-    if obj:IsA("Model") then
-        return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
-    end
-    return nil
+	if not isValidInstance(obj) then return nil end
+	if obj:IsA("BasePart") then return obj end
+	if obj:IsA("Model") then
+		if isValidInstance(obj.PrimaryPart) then
+			return obj.PrimaryPart
+		end
+		return obj:FindFirstChildWhichIsA("BasePart", true)
+	end
+	return nil
 end
 
--- LAYER 3: Menekan semua tombol UI yang muncul di PlayerGui / ProximityPromptUI / BillboardGui (firesignal + Touch/Mouse Tap)
+-- Poin #7: Kalkulasi Koordinat Klik UI Mobile Aman (absSize > 2 & pcall)
 local function tapAllVisibleInteractButtons()
-    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
-    if not pGui then return 0 end
+	if (tick() - State.LastUITapTick) < 0.16 then return 0 end
+	State.LastUITapTick = tick()
 
-    local tappedCount = 0
-    local inset = GuiService:GetGuiInset()
+	local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+	if not isValidInstance(pGui) then return 0 end
 
-    for _, guiObj in ipairs(pGui:GetDescendants()) do
-        if (guiObj:IsA("TextButton") or guiObj:IsA("ImageButton")) and guiObj.Visible then
-            local bName = string.lower(guiObj.Name)
-            local pName = guiObj.Parent and string.lower(guiObj.Parent.Name) or ""
-            local txt = ""
-            if guiObj:IsA("TextButton") then
-                txt = string.lower(guiObj.Text)
-            else
-                local childTxt = guiObj:FindFirstChildWhichIsA("TextLabel", true)
-                if childTxt then txt = string.lower(childTxt.Text) end
-            end
+	local tappedCount = 0
+	local okInset, inset = pcall(function() return GuiService:GetGuiInset() end)
+	if not okInset or not inset then
+		inset = Vector2.new(0, 36)
+	end
 
-            local isPromptUI = guiObj:FindFirstAncestor("ProximityPromptUI") ~= nil
-                or bName:find("prompt") or pName:find("prompt")
-                or bName:find("action") or bName:find("interact")
-                or txt:find("steal") or txt:find("grab") or txt:find("take")
-                or txt:find("collect") or txt:find("pick") or txt:find("claim")
-                or txt:find("egg") or txt == "e"
+	for _, guiObj in ipairs(pGui:GetDescendants()) do
+		if isValidInstance(guiObj) and (guiObj:IsA("TextButton") or guiObj:IsA("ImageButton")) and guiObj.Visible then
+			if not guiObj:IsDescendantOf(ScreenGui) then
+				local okCheck, isMatch = pcall(function()
+					local bName = string.lower(guiObj.Name)
+					local pName = (guiObj.Parent and string.lower(guiObj.Parent.Name)) or ""
+					local txt = ""
+					if guiObj:IsA("TextButton") then
+						txt = string.lower(guiObj.Text or "")
+					else
+						local childTxt = guiObj:FindFirstChildWhichIsA("TextLabel", true)
+						if childTxt then txt = string.lower(childTxt.Text or "") end
+					end
 
-            -- Jangan pencet tombol GUI script kita sendiri
-            if isPromptUI and not guiObj:IsDescendantOf(ScreenGui) then
-                tappedCount = tappedCount + 1
+					return guiObj:FindFirstAncestor("ProximityPromptUI") ~= nil
+						or bName:find("prompt", 1, true) or pName:find("prompt", 1, true)
+						or bName:find("action", 1, true) or bName:find("interact", 1, true)
+						or txt:find("steal", 1, true) or txt:find("grab", 1, true) or txt:find("take", 1, true)
+						or txt:find("collect", 1, true) or txt:find("pick", 1, true) or txt:find("claim", 1, true)
+						or txt:find("egg", 1, true) or txt == "e"
+				end)
 
-                -- 1. Panggil firesignal & getconnections jika didukung oleh Delta Executor
-                if firesignal then
-                    pcall(function() firesignal(guiObj.Activated) end)
-                    pcall(function() firesignal(guiObj.MouseButton1Down) end)
-                    pcall(function() firesignal(guiObj.MouseButton1Click) end)
-                    pcall(function() firesignal(guiObj.MouseButton1Up) end)
-                    pcall(function() firesignal(guiObj.TouchTap) end)
-                end
+				if okCheck and isMatch then
+					tappedCount = tappedCount + 1
 
-                if getconnections then
-                    for _, sig in ipairs({guiObj.Activated, guiObj.MouseButton1Click, guiObj.MouseButton1Down, guiObj.TouchTap}) do
-                        pcall(function()
-                            for _, conn in ipairs(getconnections(sig)) do
-                                if conn.Fire then conn:Fire() end
-                            end
-                        end)
-                    end
-                end
+					ExecutorSafe.fireSignal(guiObj.Activated)
+					ExecutorSafe.fireSignal(guiObj.MouseButton1Down)
+					ExecutorSafe.fireSignal(guiObj.MouseButton1Click)
+					ExecutorSafe.fireSignal(guiObj.MouseButton1Up)
+					ExecutorSafe.fireSignal(guiObj.TouchTap)
 
-                -- 2. Simulasi Klik Layar Asli tepat di tengah koordinat tombol UI tersebut
-                local absPos = guiObj.AbsolutePosition
-                local absSize = guiObj.AbsoluteSize
-                if absSize.X > 5 and absSize.Y > 5 then
-                    local clickX = absPos.X + (absSize.X / 2)
-                    local clickY = absPos.Y + (absSize.Y / 2) + inset.Y
-                    pcall(function()
-                        VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 1)
-                        task.wait(0.02)
-                        VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 1)
-                    end)
-                end
-            end
-        end
-    end
+					pcall(function()
+						local absPos = guiObj.AbsolutePosition
+						local absSize = guiObj.AbsoluteSize
+						if absPos and absSize and absSize.X > 2 and absSize.Y > 2 then
+							local clickX = absPos.X + (absSize.X * 0.5)
+							local clickY = absPos.Y + (absSize.Y * 0.5) + inset.Y
+							ExecutorSafe.sendMouseClick(clickX, clickY)
+						end
+					end)
+				end
+			end
+		end
+	end
 
-    return tappedCount
+	return tappedCount
 end
 
--- LAYER 5: Smart Remote Argument Fuzzer (Menembak Remote pengambilan telur dengan berbagai pola argumen game)
+-- Poin #4: Rate-Limiting Ketat (>= 200ms) pada Smart Remote Fuzzer
+local EggFuzzAttempts = setmetatable({}, { __mode = "k" })
+
 local function fireSmartEggRemotes(eggObj, part, promptObj)
-    if not Config.SmartRemoteFuzzer then return end
+	if not Config.SmartRemoteFuzzer then return end
+	if State.IsFuzzingRemotes then return end
+	if not isValidInstance(eggObj) then return end
 
-    for _, rem in ipairs(State.EggRemotes) do
-        if rem and rem.Parent then
-            if rem:IsA("RemoteEvent") then
-                pcall(function() rem:FireServer(eggObj) end)
-                pcall(function() rem:FireServer(part) end)
-                pcall(function() rem:FireServer(eggObj.Name) end)
-                pcall(function() rem:FireServer("Steal", eggObj) end)
-                pcall(function() rem:FireServer("Collect", eggObj) end)
-                pcall(function() rem:FireServer("Grab", eggObj) end)
-                if promptObj then
-                    pcall(function() rem:FireServer(promptObj) end)
-                end
-            elseif rem:IsA("RemoteFunction") then
-                task.spawn(function()
-                    pcall(function() rem:InvokeServer(eggObj) end)
-                    pcall(function() rem:InvokeServer("Steal", eggObj) end)
-                end)
-            end
-        end
-    end
+	local now = tick()
+	if (now - State.LastRemoteFuzzTick) < Config.RemoteBatchCooldown then
+		return
+	end
+
+	local attempts = EggFuzzAttempts[eggObj] or 0
+	if attempts >= 2 then
+		return
+	end
+
+	State.IsFuzzingRemotes = true
+	State.LastRemoteFuzzTick = now
+	EggFuzzAttempts[eggObj] = attempts + 1
+
+	spawnManagedThread(function()
+		local fired = 0
+		for _, rem in ipairs(State.EggRemotes) do
+			if not State.ScriptAlive or not State.IsPressingEgg or not isValidInstance(eggObj) then
+				break
+			end
+			if isValidInstance(rem) then
+				fired = fired + 1
+				if fired > 5 then break end
+
+				if rem:IsA("RemoteEvent") then
+					pcall(function() rem:FireServer(eggObj) end)
+					task.wait(Config.RemoteSingleDelay)
+
+					if State.IsPressingEgg and isValidInstance(eggObj) then
+						pcall(function() rem:FireServer("Steal", eggObj) end)
+						task.wait(Config.RemoteSingleDelay)
+					end
+
+					if State.IsPressingEgg and isValidInstance(eggObj) then
+						pcall(function() rem:FireServer("Collect", eggObj) end)
+						task.wait(Config.RemoteSingleDelay)
+					end
+
+					if State.IsPressingEgg and isValidInstance(promptObj) then
+						pcall(function() rem:FireServer(promptObj) end)
+						task.wait(Config.RemoteSingleDelay)
+					elseif State.IsPressingEgg and isValidInstance(part) then
+						pcall(function() rem:FireServer(part) end)
+						task.wait(Config.RemoteSingleDelay)
+					end
+				elseif rem:IsA("RemoteFunction") then
+					spawnManagedThread(function()
+						pcall(function() rem:InvokeServer(eggObj) end)
+					end)
+					task.wait(Config.RemoteSingleDelay)
+				end
+			end
+		end
+		State.IsFuzzingRemotes = false
+	end)
 end
 
--- Cek Jumlah Objek/Telur yang Sedang Dibawa Karakter
+-- Perhitungan Akurat Objek yang Sedang Dibawa Karakter
+local function isCarryKeyword(str)
+	local s = string.lower(tostring(str or ""))
+	return s:find("egg", 1, true)
+		or s:find("pet", 1, true)
+		or s:find("steal", 1, true)
+		or s:find("carry", 1, true)
+		or s:find("stolen", 1, true)
+		or s:find("crate", 1, true)
+end
+
+local function recordStarterTools()
+	table.clear(State.StarterToolNames)
+	local backpack = LocalPlayer:FindFirstChild("Backpack")
+	if isValidInstance(backpack) then
+		for _, item in ipairs(backpack:GetChildren()) do
+			if item:IsA("Tool") and not isCarryKeyword(item.Name) then
+				State.StarterToolNames[item.Name] = true
+			end
+		end
+	end
+end
+
 local function countCarriedObjects()
-    local char = LocalPlayer.Character
-    local backpack = LocalPlayer:FindFirstChild("Backpack")
-    local count = 0
+	local char = LocalPlayer.Character
+	if not isValidInstance(char) then return 0 end
 
-    if char then
-        for _, child in ipairs(char:GetChildren()) do
-            if child:IsA("Tool") or child:IsA("Model") then
-                local n = string.lower(child.Name)
-                if n:find("egg") or n:find("pet") or n:find("steal") or n:find("carry") or child:FindFirstChildWhichIsA("BasePart") then
-                    count = count + 1
-                end
-            end
-        end
-        for _, desc in ipairs(char:GetDescendants()) do
-            if desc:IsA("Weld") or desc:IsA("WeldConstraint") or desc:IsA("Motor6D") then
-                local p0, p1 = desc.Part0, desc.Part1
-                if (p0 and not p0:IsDescendantOf(char)) or (p1 and not p1:IsDescendantOf(char)) then
-                    count = count + 2
-                end
-            end
-        end
-        for k, v in pairs(char:GetAttributes()) do
-            local kn = string.lower(k)
-            if (kn:find("carry") or kn:find("egg") or kn:find("holding") or kn:find("stolen")) and v ~= false and v ~= nil and v ~= "" and v ~= 0 then
-                count = count + 2
-            end
-        end
-    end
+	local count = 0
+	local seen = {}
 
-    for k, v in pairs(LocalPlayer:GetAttributes()) do
-        local kn = string.lower(k)
-        if (kn:find("carry") or kn:find("egg") or kn:find("holding") or kn:find("stolen")) and v ~= false and v ~= nil and v ~= "" and v ~= 0 then
-            count = count + 2
-        end
-    end
+	for _, child in ipairs(char:GetChildren()) do
+		if isValidInstance(child) and not child:IsA("Accessory") and not child:IsA("Shirt") and not child:IsA("Pants") and not child:IsA("BodyColors") then
+			if child:IsA("Tool") then
+				if not State.StarterToolNames[child.Name] or isCarryKeyword(child.Name) then
+					seen[child] = true
+					count = count + 1
+				end
+			elseif child:IsA("Model") then
+				if isCarryKeyword(child.Name) or child:GetAttribute("IsEgg") ~= nil or child:GetAttribute("Owner") ~= nil then
+					seen[child] = true
+					count = count + 1
+				end
+			elseif child:IsA("BasePart") and isCarryKeyword(child.Name) then
+				seen[child] = true
+				count = count + 1
+			end
+		end
+	end
 
-    if backpack then
-        count = count + #backpack:GetChildren()
-    end
+	for _, desc in ipairs(char:GetDescendants()) do
+		if desc:IsA("Weld") or desc:IsA("WeldConstraint") or desc:IsA("Motor6D") then
+			local p0, p1 = desc.Part0, desc.Part1
+			local ext = nil
+			if isValidInstance(p0) and p0 ~= SafePad and not p0:IsDescendantOf(char) then
+				ext = p0
+			elseif isValidInstance(p1) and p1 ~= SafePad and not p1:IsDescendantOf(char) then
+				ext = p1
+			end
 
-    return count
+			if ext then
+				local rootModel = ext:FindFirstAncestorOfClass("Model") or ext
+				if not seen[rootModel] and rootModel ~= Workspace then
+					seen[rootModel] = true
+					count = count + 1
+				end
+			end
+		end
+	end
+
+	for _, holder in ipairs({ char, LocalPlayer }) do
+		if isValidInstance(holder) then
+			local ok, attrs = pcall(function() return holder:GetAttributes() end)
+			if ok and type(attrs) == "table" then
+				for k, v in pairs(attrs) do
+					local kn = string.lower(tostring(k))
+					if kn:find("carry", 1, true) or kn:find("egg", 1, true) or kn:find("holding", 1, true) or kn:find("stolen", 1, true) then
+						if v ~= false and v ~= nil and v ~= "" and v ~= 0 then
+							count = count + 1
+						end
+					end
+				end
+			end
+		end
+	end
+
+	local backpack = LocalPlayer:FindFirstChild("Backpack")
+	if isValidInstance(backpack) then
+		for _, item in ipairs(backpack:GetChildren()) do
+			if item:IsA("Tool") and not State.StarterToolNames[item.Name] and isCarryKeyword(item.Name) then
+				if not seen[item] then
+					seen[item] = true
+					count = count + 1
+				end
+			end
+		end
+	end
+
+	return count
 end
 
 local function isEggGrabbedOrGone(eggObj, part, initialCarry)
-    local char = LocalPlayer.Character
-    if not char then return false end
+	local char = LocalPlayer.Character
+	if not isValidInstance(char) then return false end
 
-    if countCarriedObjects() > initialCarry then
-        return true
-    end
-    if eggObj and (eggObj:IsDescendantOf(char) or (LocalPlayer:FindFirstChild("Backpack") and eggObj:IsDescendantOf(LocalPlayer.Backpack))) then
-        return true
-    end
-    if not eggObj or not eggObj.Parent or not part or not part.Parent or part.Transparency >= 0.88 then
-        return true
-    end
+	if countCarriedObjects() > initialCarry then
+		return true
+	end
+	if isValidInstance(eggObj) then
+		if eggObj:IsDescendantOf(char) then return true end
+		local bp = LocalPlayer:FindFirstChild("Backpack")
+		if isValidInstance(bp) and eggObj:IsDescendantOf(bp) then return true end
+	end
+	if not isValidInstance(eggObj) or not isValidInstance(part) or part.Transparency >= 0.88 then
+		return true
+	end
 
-    local pr = eggObj:FindFirstChildWhichIsA("ProximityPrompt", true) or (eggObj.Parent and eggObj.Parent:FindFirstChildWhichIsA("ProximityPrompt"))
-    if pr and not pr.Enabled then
-        return true
-    end
+	local pr = eggObj:FindFirstChildWhichIsA("ProximityPrompt", true)
+		or (isValidInstance(eggObj.Parent) and eggObj.Parent:FindFirstChildWhichIsA("ProximityPrompt"))
+	if isValidInstance(pr) and not pr.Enabled then
+		return true
+	end
 
-    return false
+	return false
 end
 
 -- ==========================================
--- 6. PEMINDAI PLOT PEMAIN LAIN & WILD EGG
+-- 6. PEMINDAI PLOT PEMAIN PRESISI & PARSING ZONA AMAN
 -- ==========================================
-local function scanAllPlayerPlotsAndRemotes()
-    table.clear(State.PlotCenters)
-    table.clear(State.PlotModels)
-    table.clear(State.EggRemotes)
-
-    local myName = string.lower(LocalPlayer.Name)
-    local myDisp = string.lower(LocalPlayer.DisplayName)
-    local playerNames = {}
-    for _, plr in ipairs(Players:GetPlayers()) do
-        playerNames[string.lower(plr.Name)] = plr
-        playerNames[string.lower(plr.DisplayName)] = plr
-    end
-
-    -- Scan semua Remote di ReplicatedStorage & Workspace
-    for _, rem in ipairs(ReplicatedStorage:GetDescendants()) do
-        if rem:IsA("RemoteEvent") or rem:IsA("RemoteFunction") then
-            local rn = string.lower(rem.Name)
-            if rn:find("steal") or rn:find("collect") or rn:find("grab") or rn:find("pickup") or rn:find("claim") or rn:find("egg") or rn:find("take") or rn:find("interact") then
-                table.insert(State.EggRemotes, rem)
-            end
-        end
-    end
-
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("Model") or obj:IsA("Folder") then
-            local n = string.lower(obj.Name)
-            if n:find("plot") or n:find("base") or n:find("tycoon") or n:find("stand") or n:find("camp") or n:find("hatchery") or n:find("slot") then
-                local p = getPart(obj)
-                if p and p.Position.Y < (State.MapMinY + 85) then
-                    State.PlotModels[obj] = true
-                    table.insert(State.PlotCenters, p.Position)
-                end
-            end
-        end
-
-        if obj:IsA("TextLabel") or obj:IsA("StringValue") or obj:IsA("ObjectValue") then
-            local val = obj:IsA("TextLabel") and string.lower(obj.Text) or string.lower(tostring(obj.Value))
-            if val ~= "" then
-                local plotMdl = obj:FindFirstAncestorOfClass("Model")
-                local plotPart = plotMdl and getPart(plotMdl)
-
-                if val:find(myName, 1, true) or val:find(myDisp, 1, true) then
-                    if plotMdl and plotPart then
-                        State.PlotModels[plotMdl] = true
-                        table.insert(State.PlotCenters, plotPart.Position)
-                        Config.BaseCFrame = plotPart.CFrame + Vector3.new(0, 3.0, 0)
-
-                        for _, sub in ipairs(plotMdl:GetDescendants()) do
-                            if sub:IsA("BasePart") then
-                                local sn = string.lower(sub.Name)
-                                if sn:find("deposit") or sn:find("place") or sn:find("deliver") or sn:find("drop") or sn:find("pad") or sn:find("collect") then
-                                    Config.DepositPadCFrame = sub.CFrame + Vector3.new(0, 2.5, 0)
-                                    break
-                                end
-                            end
-                        end
-                    end
-                else
-                    for pName, _ in pairs(playerNames) do
-                        if #pName >= 3 and val:find(pName, 1, true) then
-                            if plotMdl and plotPart then
-                                State.PlotModels[plotMdl] = true
-                                table.insert(State.PlotCenters, plotPart.Position)
-                            end
-                            break
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    if not Config.BaseCFrame then
-        local sp = Workspace:FindFirstChildWhichIsA("SpawnLocation", true)
-        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        Config.BaseCFrame = sp and (sp.CFrame + Vector3.new(0, 3.0, 0)) or (root and root.CFrame or CFrame.new(0, 20, 0))
-    end
-    if not Config.DepositPadCFrame then
-        Config.DepositPadCFrame = Config.BaseCFrame
-    end
-end
-
-local function isEggInsideAnyPlayerPlot(eggObj, part)
-    if not Config.IgnoreOtherPlayerPlots then return false end
-
-    local curr = eggObj
-    while curr and curr ~= Workspace do
-        if State.PlotModels[curr] then return true end
-        local cn = string.lower(curr.Name)
-        if cn:find("plot") or cn:find("base") or cn:find("placed") or cn:find("owned") or cn:find("incubator") or cn:find("hatch") or cn:find("stand") or cn:find("slot") or cn:find("camp") then
-            return true
-        end
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if cn == string.lower(plr.Name) or cn == string.lower(plr.DisplayName) then
-                return true
-            end
-        end
-        curr = curr.Parent
-    end
-
-    for attrName, attrVal in pairs(eggObj:GetAttributes()) do
-        local an = string.lower(attrName)
-        if an:find("owner") or an:find("placed") or an:find("plot") or an:find("claimed") or an:find("userid") or an:find("holder") then
-            if attrVal ~= nil and attrVal ~= false and attrVal ~= "" and attrVal ~= 0 then
-                return true
-            end
-        end
-    end
-
-    for _, d in ipairs(eggObj:GetDescendants()) do
-        if d:IsA("ProximityPrompt") then
-            local act = string.lower(d.ActionText .. " " .. d.ObjectText)
-            if act:find("sell") or act:find("hatch") or act:find("remove") or act:find("upgrade") or act:find("lock") then
-                return true
-            end
-        elseif d:IsA("TextLabel") then
-            local tl = string.lower(d.Text)
-            if tl:find("/s") or tl:find("$/") or tl:find("income") or tl:find("owned by") then
-                return true
-            end
-        end
-    end
-
-    for _, plotPos in ipairs(State.PlotCenters) do
-        local hDist = (Vector2.new(part.Position.X, part.Position.Z) - Vector2.new(plotPos.X, plotPos.Z)).Magnitude
-        local vDiff = math.abs(part.Position.Y - plotPos.Y)
-        if hDist <= Config.PlotSafeRadius and vDiff <= 35 then
-            return true
-        end
-    end
-
-    return false
-end
-
-local function matchAreaIdFromText(str)
-    local s = string.lower(tostring(str or ""))
-    for i = #RarityAreas, 2, -1 do
-        local area = RarityAreas[i]
-        for _, kw in ipairs(area.Keywords) do
-            if s:find(string.lower(kw), 1, true) then
-                return area.Id
-            end
-        end
-    end
-    return nil
-end
-
-local function calibrateMapRarityAreas()
-    local minY, maxY = math.huge, -math.huge
-    local detectedZones = {}
-
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") and State.PromptOrigHold[obj] == nil then
-            State.PromptOrigHold[obj] = obj.HoldDuration
-        end
-
-        if obj:IsA("BasePart") and obj.Name ~= "OverdriveV8SafePad" then
-            if obj.Position.Y > -200 and obj.Position.Y < 40000 and obj.Size.Magnitude < 650 then
-                local n = string.lower(obj.Name)
-                local p = obj.Parent and string.lower(obj.Parent.Name) or ""
-                if n:find("egg") or n:find("nest") or n:find("stage") or n:find("area") or n:find("zone") or p:find("egg") or p:find("stage") or p:find("area") then
-                    if obj.Position.Y < minY then minY = obj.Position.Y end
-                    if obj.Position.Y > maxY then maxY = obj.Position.Y end
-                end
-
-                local areaId = matchAreaIdFromText(obj.Name .. " " .. p)
-                if areaId and not detectedZones[areaId] then
-                    detectedZones[areaId] = obj.CFrame + Vector3.new(0, 3.5, 0)
-                end
-            end
-        end
-    end
-
-    if minY == math.huge then minY = 0 end
-    if maxY == -math.huge or maxY <= minY then maxY = minY + 600 end
-
-    State.MapMinY = minY
-    State.MapMaxY = maxY
-
-    local spanY = math.max(100, maxY - minY)
-    for idx = 2, #RarityAreas do
-        local area = RarityAreas[idx]
-        if detectedZones[area.Id] then
-            State.ZoneCheckpoints[area.Id] = detectedZones[area.Id]
-        else
-            local midY = minY + (spanY * ((area.HeightMin + area.HeightMax) / 2))
-            local bestPart, bestDiff = nil, math.huge
-            for _, obj in ipairs(Workspace:GetDescendants()) do
-                if obj:IsA("BasePart") and obj.CanCollide and obj.Size.Magnitude < 450 and obj.Position.Y >= minY and obj.Position.Y <= maxY + 30 then
-                    local diff = math.abs(obj.Position.Y - midY)
-                    if diff < bestDiff then
-                        bestDiff = diff
-                        bestPart = obj
-                    end
-                end
-            end
-            if bestPart then
-                State.ZoneCheckpoints[area.Id] = bestPart.CFrame + Vector3.new(0, 3.5, 0)
-            end
-        end
-    end
-
-    scanAllPlayerPlotsAndRemotes()
-end
-
-task.spawn(function()
-    task.wait(1)
-    calibrateMapRarityAreas()
-end)
-
-local function isWildEggReady(eggObj, part)
-    if not eggObj or not eggObj.Parent or not part or not part.Parent then
-        return false
-    end
-
-    if Config.SkipRecentlyVisited then
-        local exp = State.VisitedEggs[eggObj]
-        if exp and tick() < exp then
-            return false
-        end
-    end
-
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr.Character and (eggObj:IsDescendantOf(plr.Character) or part:IsDescendantOf(plr.Character)) then
-            return false
-        end
-    end
-
-    if isEggInsideAnyPlayerPlot(eggObj, part) then
-        return false
-    end
-
-    if Config.OnlyActiveWildEggs then
-        if part.Transparency >= 0.9 then
-            return false
-        end
-        local pr = eggObj:FindFirstChildWhichIsA("ProximityPrompt", true) or (eggObj.Parent and eggObj.Parent:FindFirstChildWhichIsA("ProximityPrompt"))
-        if pr and not pr.Enabled then
-            return false
-        end
-    end
-
-    return true
-end
-
-local function getEggRarityAndZone(eggObj, part)
-    local combined = string.lower(eggObj.Name)
-    local parent = eggObj.Parent
-    while parent and parent ~= Workspace do
-        combined = combined .. " " .. string.lower(parent.Name)
-        parent = parent.Parent
-    end
-
-    for _, attrVal in pairs(eggObj:GetAttributes()) do
-        if type(attrVal) == "string" then
-            combined = combined .. " " .. string.lower(attrVal)
-        end
-    end
-
-    for _, d in ipairs(eggObj:GetDescendants()) do
-        if d:IsA("TextLabel") then combined = combined .. " " .. string.lower(d.Text)
-        elseif d:IsA("StringValue") then combined = combined .. " " .. string.lower(d.Value) end
-    end
-
-    local textAreaId = matchAreaIdFromText(combined)
-    local ratioY = math.clamp((part.Position.Y - State.MapMinY) / math.max(100, State.MapMaxY - State.MapMinY), 0, 1)
-    local heightZoneId = 1
-    for i = 2, #RarityAreas do
-        local a = RarityAreas[i]
-        if ratioY >= a.HeightMin and ratioY <= a.HeightMax + 0.05 then
-            heightZoneId = a.Id
-        end
-    end
-
-    local finalRarityId = textAreaId or heightZoneId
-    local areaEntry = RarityAreas[finalRarityId + 1] or RarityAreas[2]
-    return finalRarityId, heightZoneId, areaEntry.ShortName, areaEntry.Color
+local function isDepositPadCandidate(obj)
+	if not isValidInstance(obj) or not obj:IsA("BasePart") or obj == SafePad then return false end
+	local n = string.lower(obj.Name)
+	return n:find("deposit", 1, true)
+		or n:find("place", 1, true)
+		or n:find("deliver", 1, true)
+		or n:find("drop", 1, true)
+		or n:find("pad", 1, true)
+		or n:find("collect", 1, true)
+		or n:find("base", 1, true)
+		or n:find("stand", 1, true)
 end
 
 local function isCandidateWildEgg(obj)
-    if not obj or not obj.Parent then return false end
-    if obj:IsA("Model") or obj:IsA("BasePart") then
-        if obj:IsA("BasePart") and obj.Parent and obj.Parent:IsA("Model") and obj.Parent ~= Workspace then
-            local pn = string.lower(obj.Parent.Name)
-            if pn:find(Config.CustomKeyword, 1, true) or pn:find("egg", 1, true) then
-                return false
-            end
-        end
+	if not isValidInstance(obj) or obj == SafePad then return false end
+	if obj:IsA("Model") or obj:IsA("BasePart") then
+		if obj:IsA("BasePart") and isValidInstance(obj.Parent) and obj.Parent:IsA("Model") and obj.Parent ~= Workspace then
+			local pn = string.lower(obj.Parent.Name)
+			if pn:find(Config.CustomKeyword, 1, true) or pn:find("egg", 1, true) then
+				return false
+			end
+		end
 
-        local n = string.lower(obj.Name)
-        local p = obj.Parent and string.lower(obj.Parent.Name) or ""
-        local hasPrompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil
-        local hasClick = obj:FindFirstChildWhichIsA("ClickDetector", true) ~= nil
+		local n = string.lower(obj.Name)
+		local p = (isValidInstance(obj.Parent) and string.lower(obj.Parent.Name)) or ""
+		local hasPrompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil
+		local hasClick = obj:FindFirstChildWhichIsA("ClickDetector", true) ~= nil
 
-        if n:find(Config.CustomKeyword, 1, true) or p:find("egg", 1, true) or (hasPrompt and (n:find("nest") or n:find("spawn") or p:find("spawn"))) or hasClick then
-            local part = getPart(obj)
-            if part and part.Size.Magnitude < 65 then
-                return true
-            end
-        end
-    end
-    return false
+		if n:find(Config.CustomKeyword, 1, true) or p:find("egg", 1, true) or (hasPrompt and (n:find("nest", 1, true) or n:find("spawn", 1, true) or p:find("spawn", 1, true))) or hasClick then
+			local part = getPart(obj)
+			if isValidInstance(part) and part.Size.Magnitude < 65 then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function registerWorkspaceInstance(obj)
+	if not isValidInstance(obj) or obj == SafePad then return end
+	if obj:IsA("ProximityPrompt") then
+		State.TrackedPrompts[obj] = true
+		if State.PromptOrigHold[obj] == nil then
+			State.PromptOrigHold[obj] = obj.HoldDuration
+		end
+		if isValidInstance(obj.Parent) and isCandidateWildEgg(obj.Parent) then
+			State.TrackedCandidates[obj.Parent] = true
+		end
+		local mdl = obj:FindFirstAncestorOfClass("Model")
+		if isValidInstance(mdl) and isCandidateWildEgg(mdl) then
+			State.TrackedCandidates[mdl] = true
+		end
+	elseif isCandidateWildEgg(obj) then
+		State.TrackedCandidates[obj] = true
+	end
+
+	if isDepositPadCandidate(obj) then
+		State.TrackedDepositPads[obj] = true
+	end
+end
+
+local function unregisterWorkspaceInstance(obj)
+	if not obj then return end
+	State.TrackedCandidates[obj] = nil
+	State.TrackedPrompts[obj] = nil
+	State.TrackedDepositPads[obj] = nil
+	State.PromptOrigHold[obj] = nil
+	State.VisitedEggs[obj] = nil
+end
+
+addGlobalConn(Workspace.DescendantAdded:Connect(function(obj)
+	task.defer(registerWorkspaceInstance, obj)
+end), "WS_DescAdded")
+
+addGlobalConn(Workspace.DescendantRemoving:Connect(function(obj)
+	unregisterWorkspaceInstance(obj)
+end), "WS_DescRemoving")
+
+local function scanAllPlayerPlotsAndRemotes()
+	table.clear(State.PlotCenters)
+	table.clear(State.PlotModels)
+	table.clear(State.EggRemotes)
+
+	local myName = string.lower(LocalPlayer.Name)
+	local myDisp = string.lower(LocalPlayer.DisplayName)
+	local playerNames = {}
+	for _, plr in ipairs(Players:GetPlayers()) do
+		local n1 = string.lower(plr.Name)
+		local n2 = string.lower(plr.DisplayName)
+		if #n1 >= 3 then playerNames[n1] = plr end
+		if #n2 >= 3 then playerNames[n2] = plr end
+	end
+
+	for _, rem in ipairs(ReplicatedStorage:GetDescendants()) do
+		if isValidInstance(rem) and (rem:IsA("RemoteEvent") or rem:IsA("RemoteFunction")) then
+			local rn = string.lower(rem.Name)
+			if rn:find("steal", 1, true) or rn:find("collect", 1, true) or rn:find("grab", 1, true) or rn:find("pickup", 1, true) or rn:find("claim", 1, true) or rn:find("egg", 1, true) or rn:find("take", 1, true) or rn:find("interact", 1, true) then
+				table.insert(State.EggRemotes, rem)
+			end
+		end
+	end
+
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		if isValidInstance(obj) then
+			registerWorkspaceInstance(obj)
+
+			if obj:IsA("Model") or obj:IsA("Folder") then
+				local n = string.lower(obj.Name)
+				-- Poin #6: Hanya mendeteksi container plot/base eksplisit di dataran rendah agar tidak salah memblokir spawn telur liar
+				if n:find("playerplot", 1, true) or n:find("plot", 1, true) or n:find("tycoon", 1, true) or n:find("hatchery", 1, true) or n:find("baseplot", 1, true) then
+					local p = getPart(obj)
+					if isValidInstance(p) and p.Position.Y <= (State.MapMinY + 55) then
+						State.PlotModels[obj] = true
+						table.insert(State.PlotCenters, p.Position)
+					end
+				end
+			end
+
+			if obj:IsA("TextLabel") or obj:IsA("StringValue") or obj:IsA("ObjectValue") then
+				local okVal, val = pcall(function()
+					if obj:IsA("TextLabel") then
+						return string.lower(obj.Text or "")
+					elseif obj:IsA("StringValue") then
+						return string.lower(obj.Value or "")
+					elseif obj:IsA("ObjectValue") and isValidInstance(obj.Value) then
+						return string.lower(obj.Value.Name or "")
+					end
+					return ""
+				end)
+
+				if okVal and val and val ~= "" then
+					local plotMdl = obj:FindFirstAncestorOfClass("Model")
+					local plotPart = isValidInstance(plotMdl) and getPart(plotMdl)
+
+					if isValidInstance(plotMdl) and isValidInstance(plotPart) and plotPart.Position.Y <= (State.MapMinY + 75) then
+						if val:find(myName, 1, true) or (#myDisp >= 3 and val:find(myDisp, 1, true)) then
+							State.PlotModels[plotMdl] = true
+							table.insert(State.PlotCenters, plotPart.Position)
+							Config.BaseCFrame = plotPart.CFrame + Vector3.new(0, 3.0, 0)
+
+							for _, sub in ipairs(plotMdl:GetDescendants()) do
+								if isValidInstance(sub) and sub:IsA("BasePart") then
+									local sn = string.lower(sub.Name)
+									if sn:find("deposit", 1, true) or sn:find("place", 1, true) or sn:find("deliver", 1, true) or sn:find("drop", 1, true) or sn:find("pad", 1, true) or sn:find("collect", 1, true) then
+										Config.DepositPadCFrame = sub.CFrame + Vector3.new(0, 2.5, 0)
+										break
+									end
+								end
+							end
+						else
+							for pName, _ in pairs(playerNames) do
+								if #pName >= 4 and (val == pName or val:find(pName .. "'s", 1, true) or val:find("plot", 1, true) and val:find(pName, 1, true)) then
+									State.PlotModels[plotMdl] = true
+									table.insert(State.PlotCenters, plotPart.Position)
+									break
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	if not Config.BaseCFrame then
+		local sp = Workspace:FindFirstChildWhichIsA("SpawnLocation", true)
+		local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+		Config.BaseCFrame = (isValidInstance(sp) and (sp.CFrame + Vector3.new(0, 3.0, 0)))
+			or (isValidInstance(root) and root.CFrame)
+			or CFrame.new(0, 20, 0)
+	end
+	if not Config.DepositPadCFrame then
+		Config.DepositPadCFrame = Config.BaseCFrame
+	end
+end
+
+-- Poin #6: Validasi Plot Pemain Diperketat agar Telur Liar Tidak Ter-skip
+local function isEggInsideAnyPlayerPlot(eggObj, part)
+	if not Config.IgnoreOtherPlayerPlots then return false end
+	if not isValidInstance(eggObj) or not isValidInstance(part) then return false end
+
+	-- 1. Cek hirarki parent terhadap PlotModels yang terverifikasi atau kata kunci kepemilikan eksplisit
+	local curr = eggObj
+	while isValidInstance(curr) and curr ~= Workspace do
+		if State.PlotModels[curr] then
+			return true
+		end
+		local cn = string.lower(curr.Name)
+		if cn:find("playerplot", 1, true) or cn:find("placedegg", 1, true) or cn:find("ownedegg", 1, true) or cn:find("incubator", 1, true) or cn:find("hatchery", 1, true) then
+			return true
+		end
+		for _, plr in ipairs(Players:GetPlayers()) do
+			local pName = string.lower(plr.Name)
+			if #pName >= 3 and (cn == pName or cn == (pName .. "_plot") or cn == ("plot_" .. pName)) then
+				return true
+			end
+		end
+		curr = curr.Parent
+	end
+
+	-- 2. Cek atribut kepemilikan eksplisit pada telur
+	local okAttr, attrs = pcall(function() return eggObj:GetAttributes() end)
+	if okAttr and type(attrs) == "table" then
+		for attrName, attrVal in pairs(attrs) do
+			local an = string.lower(tostring(attrName))
+			if an == "owner" or an == "ownerid" or an == "userid" or an == "placed" or an == "plotowner" then
+				if attrVal ~= nil and attrVal ~= false and attrVal ~= "" and attrVal ~= 0 then
+					return true
+				end
+			end
+		end
+	end
+
+	-- 3. Cek ProximityPrompt atau TextLabel indikator telur yang sudah ditaruh di base
+	for _, d in ipairs(eggObj:GetDescendants()) do
+		if isValidInstance(d) then
+			if d:IsA("ProximityPrompt") then
+				local act = string.lower((d.ActionText or "") .. " " .. (d.ObjectText or ""))
+				if act:find("sell", 1, true) or act:find("hatch", 1, true) or act:find("remove", 1, true) or act:find("upgrade", 1, true) or act:find("lock", 1, true) then
+					return true
+				end
+			elseif d:IsA("TextLabel") then
+				local tl = string.lower(d.Text or "")
+				if tl:find("/s", 1, true) or tl:find("$/", 1, true) or tl:find("income", 1, true) or tl:find("owned by", 1, true) or tl:find("hatching", 1, true) then
+					return true
+				end
+			end
+		end
+	end
+
+	-- 4. Cek radius horizontal & vertikal ketat hanya di sekitar plot dasar
+	for _, plotPos in ipairs(State.PlotCenters) do
+		local hDist = (Vector2.new(part.Position.X, part.Position.Z) - Vector2.new(plotPos.X, plotPos.Z)).Magnitude
+		local vDiff = part.Position.Y - plotPos.Y
+		if hDist <= Config.PlotSafeRadius and vDiff >= -10 and vDiff <= 18 then
+			return true
+		end
+	end
+
+	return false
+end
+
+-- Poin #5: Fungsi Parsing String Zona/Rarity dengan pcall & Fallback Default Cerdas
+local function matchAreaIdFromText(str)
+	local ok, result = pcall(function()
+		if type(str) ~= "string" or str == "" then return nil end
+		local s = string.lower(str)
+		for i = #RarityAreas, 2, -1 do
+			local area = RarityAreas[i]
+			if area and type(area.Keywords) == "table" then
+				for _, kw in ipairs(area.Keywords) do
+					if type(kw) == "string" and kw ~= "" and s:find(string.lower(kw), 1, true) then
+						return area.Id
+					end
+				end
+			end
+		end
+		return nil
+	end)
+	if ok then
+		return result
+	end
+	return nil
+end
+
+local function getEggRarityAndZone(eggObj, part)
+	local fallbackArea = RarityAreas[2] -- Default ke Area 1: Common Zone
+	if not isValidInstance(eggObj) or not isValidInstance(part) then
+		return 1, 1, fallbackArea.ShortName, fallbackArea.Color
+	end
+
+	local ok, rId, zId, shortName, color = pcall(function()
+		local chunks = { string.lower(eggObj.Name or "") }
+		local parent = eggObj.Parent
+		local depth = 0
+		while isValidInstance(parent) and parent ~= Workspace and depth < 6 do
+			depth = depth + 1
+			table.insert(chunks, string.lower(parent.Name or ""))
+			parent = parent.Parent
+		end
+
+		local okAttrs, attrs = pcall(function() return eggObj:GetAttributes() end)
+		if okAttrs and type(attrs) == "table" then
+			for _, attrVal in pairs(attrs) do
+				if type(attrVal) == "string" then
+					table.insert(chunks, string.lower(attrVal))
+				end
+			end
+		end
+
+		for _, d in ipairs(eggObj:GetDescendants()) do
+			if isValidInstance(d) then
+				if d:IsA("TextLabel") and type(d.Text) == "string" then
+					table.insert(chunks, string.lower(d.Text))
+				elseif d:IsA("StringValue") and type(d.Value) == "string" then
+					table.insert(chunks, string.lower(d.Value))
+				end
+			end
+		end
+
+		local combined = table.concat(chunks, " ")
+		local textAreaId = matchAreaIdFromText(combined)
+
+		local span = math.max(100, (State.MapMaxY or 600) - (State.MapMinY or 0))
+		local ratioY = math.clamp((part.Position.Y - (State.MapMinY or 0)) / span, 0, 1)
+		local heightZoneId = 1
+		for i = 2, #RarityAreas do
+			local a = RarityAreas[i]
+			if a and ratioY >= a.HeightMin and ratioY <= (a.HeightMax + 0.05) then
+				heightZoneId = a.Id
+			end
+		end
+
+		local finalRarityId = textAreaId or heightZoneId or 1
+		local areaEntry = RarityAreas[finalRarityId + 1] or fallbackArea
+		return finalRarityId, heightZoneId, areaEntry.ShortName, areaEntry.Color
+	end)
+
+	if ok and rId and zId and shortName and color then
+		return rId, zId, shortName, color
+	end
+	return 1, 1, fallbackArea.ShortName, fallbackArea.Color
+end
+
+local function calibrateMapRarityAreas()
+	local minY, maxY = math.huge, -math.huge
+	local detectedZones = {}
+	local collidableParts = {}
+
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		if isValidInstance(obj) then
+			registerWorkspaceInstance(obj)
+
+			if obj:IsA("BasePart") and obj ~= SafePad then
+				local pos = obj.Position
+				if pos.Y > -200 and pos.Y < 40000 and obj.Size.Magnitude < 650 then
+					local n = string.lower(obj.Name)
+					local p = (isValidInstance(obj.Parent) and string.lower(obj.Parent.Name)) or ""
+					if n:find("egg", 1, true) or n:find("nest", 1, true) or n:find("stage", 1, true) or n:find("area", 1, true) or n:find("zone", 1, true) or p:find("egg", 1, true) or p:find("stage", 1, true) or p:find("area", 1, true) then
+						if pos.Y < minY then minY = pos.Y end
+						if pos.Y > maxY then maxY = pos.Y end
+					end
+
+					local areaId = matchAreaIdFromText(obj.Name .. " " .. p)
+					if areaId and not detectedZones[areaId] then
+						detectedZones[areaId] = obj.CFrame + Vector3.new(0, 3.5, 0)
+					end
+
+					if obj.CanCollide and obj.Size.Magnitude < 450 then
+						table.insert(collidableParts, obj)
+					end
+				end
+			end
+		end
+	end
+
+	if minY == math.huge then minY = 0 end
+	if maxY == -math.huge or maxY <= minY then maxY = minY + 600 end
+
+	State.MapMinY = minY
+	State.MapMaxY = maxY
+
+	local spanY = math.max(100, maxY - minY)
+	for idx = 2, #RarityAreas do
+		local area = RarityAreas[idx]
+		if detectedZones[area.Id] then
+			State.ZoneCheckpoints[area.Id] = detectedZones[area.Id]
+		else
+			local midY = minY + (spanY * ((area.HeightMin + area.HeightMax) / 2))
+			local bestPart, bestDiff = nil, math.huge
+			for _, obj in ipairs(collidableParts) do
+				if isValidInstance(obj) and obj.Position.Y >= minY and obj.Position.Y <= maxY + 30 then
+					local diff = math.abs(obj.Position.Y - midY)
+					if diff < bestDiff then
+						bestDiff = diff
+						bestPart = obj
+					end
+				end
+			end
+			if isValidInstance(bestPart) then
+				State.ZoneCheckpoints[area.Id] = bestPart.CFrame + Vector3.new(0, 3.5, 0)
+			end
+		end
+	end
+
+	scanAllPlayerPlotsAndRemotes()
+end
+
+spawnManagedThread(function()
+	task.wait(1)
+	recordStarterTools()
+	calibrateMapRarityAreas()
+end)
+
+local function isWildEggReady(eggObj, part)
+	if not isValidInstance(eggObj) or not isValidInstance(part) then
+		return false
+	end
+
+	if Config.SkipRecentlyVisited then
+		local exp = State.VisitedEggs[eggObj]
+		if exp and tick() < exp then
+			return false
+		end
+	end
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if isValidInstance(plr.Character) and (eggObj:IsDescendantOf(plr.Character) or part:IsDescendantOf(plr.Character)) then
+			return false
+		end
+	end
+
+	if isEggInsideAnyPlayerPlot(eggObj, part) then
+		return false
+	end
+
+	if Config.OnlyActiveWildEggs then
+		if part.Transparency >= 0.9 then
+			return false
+		end
+		local pr = eggObj:FindFirstChildWhichIsA("ProximityPrompt", true)
+			or (isValidInstance(eggObj.Parent) and eggObj.Parent:FindFirstChildWhichIsA("ProximityPrompt"))
+		if isValidInstance(pr) and not pr.Enabled then
+			return false
+		end
+	end
+
+	return true
 end
 
 local function refreshEggCache()
-    local now = tick()
-    for eggInst, expTime in pairs(State.VisitedEggs) do
-        if not eggInst or not eggInst.Parent or now >= expTime then
-            State.VisitedEggs[eggInst] = nil
-        end
-    end
+	local now = tick()
+	for eggInst, expTime in pairs(State.VisitedEggs) do
+		if not isValidInstance(eggInst) or now >= expTime then
+			State.VisitedEggs[eggInst] = nil
+		end
+	end
 
-    table.clear(State.EggCache)
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if isCandidateWildEgg(obj) then
-            local part = getPart(obj)
-            if part and isWildEggReady(obj, part) then
-                local rId, zId, tag, col = getEggRarityAndZone(obj, part)
-                table.insert(State.EggCache, {
-                    Object = obj,
-                    Part = part,
-                    RarityId = rId,
-                    ZoneId = zId,
-                    Tag = tag,
-                    Color = col
-                })
-            end
-        end
-    end
+	table.clear(State.EggCache)
+	for obj, _ in pairs(State.TrackedCandidates) do
+		if not isValidInstance(obj) then
+			State.TrackedCandidates[obj] = nil
+		elseif isCandidateWildEgg(obj) then
+			local part = getPart(obj)
+			if isValidInstance(part) and isWildEggReady(obj, part) then
+				local rId, zId, tag, col = getEggRarityAndZone(obj, part)
+				table.insert(State.EggCache, {
+					Object = obj,
+					Part = part,
+					RarityId = rId,
+					ZoneId = zId,
+					Tag = tag,
+					Color = col
+				})
+			end
+		end
+	end
 
-    LiveStatus.Text = string.format(
-        "Wild Egg: %d | Metode: %s | Terkumpul: %d",
-        #State.EggCache, State.LastTriggerMethod, State.CollectedCount
-    )
+	if isValidInstance(LiveStatus) then
+		LiveStatus.Text = string.format(
+			"Wild Egg: %d | Metode: %s | Terkumpul: %d",
+			#State.EggCache, State.LastTriggerMethod, State.CollectedCount
+		)
+	end
 end
 
 -- ==========================================
--- 7. EKSEKUSI 6-LAYER HYPER-PRESS & STOP-AND-HOLD
+-- 7. KONTROL POSISI AMAN, STREAMING & 6-LAYER HYPER-PRESS
 -- ==========================================
-local SafePad = Instance.new("Part")
-SafePad.Name = "OverdriveV8SafePad"
-SafePad.Size = Vector3.new(8, 1, 8)
-SafePad.Transparency = 1
-SafePad.Anchored = true
-SafePad.CanCollide = true
-SafePad.Parent = Workspace
-
 local function setNoclipMode(enabled)
-    local char = LocalPlayer.Character
-    if not char then return end
-    if enabled then
-        for _, p in ipairs(char:GetDescendants()) do
-            if p:IsA("BasePart") and p ~= SafePad then
-                if State.OriginalCollide[p] == nil then
-                    State.OriginalCollide[p] = p.CanCollide
-                end
-                p.CanCollide = false
-            end
-        end
-    else
-        for p, orig in pairs(State.OriginalCollide) do
-            if p and p.Parent then p.CanCollide = orig end
-        end
-        table.clear(State.OriginalCollide)
-    end
+	local char = LocalPlayer.Character
+	if not isValidInstance(char) then return end
+	if enabled then
+		for _, p in ipairs(char:GetDescendants()) do
+			if isValidInstance(p) and p:IsA("BasePart") and p ~= SafePad then
+				if State.OriginalCollide[p] == nil then
+					State.OriginalCollide[p] = p.CanCollide
+				end
+				p.CanCollide = false
+			end
+		end
+	else
+		for p, orig in pairs(State.OriginalCollide) do
+			if isValidInstance(p) then
+				p.CanCollide = orig
+			end
+		end
+		table.clear(State.OriginalCollide)
+	end
 end
 
+-- Poin #3: RequestStreamAroundAsync & Kontrol Posisi Aman Anti-Cheat
+local function requestStreamSafe(targetPos)
+	local done = false
+	task.spawn(function()
+		pcall(function()
+			LocalPlayer:RequestStreamAroundAsync(targetPos, 2.5)
+		end)
+		done = true
+	end)
+	local startWait = tick()
+	while not done and (tick() - startWait) < 0.35 do
+		RunService.Heartbeat:Wait()
+	end
+end
+
+local function safePositionCharacter(root, hum, targetCF)
+	if not isValidInstance(root) or not isValidInstance(hum) or hum.Health <= 0 then
+		return false
+	end
+
+	local startPos = root.Position
+	local destPos = targetCF.Position
+	local dist = (destPos - startPos).Magnitude
+
+	if dist > 65 then
+		requestStreamSafe(destPos)
+	end
+
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+
+	-- Micro-stepped CFrame untuk jarak menengah agar tidak memicu flag anti-cheat CFrame snap
+	if dist > Config.MaxStepTeleportDist and dist <= 360 then
+		local steps = math.clamp(math.ceil(dist / Config.MaxStepTeleportDist), 2, 8)
+		for i = 1, steps - 1 do
+			if not isValidInstance(root) or not isValidInstance(hum) or hum.Health <= 0 or State.CancelGlide then
+				return false
+			end
+			local alpha = i / steps
+			local stepPos = startPos:Lerp(destPos, alpha)
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+			root.CFrame = CFrame.new(stepPos) * targetCF.Rotation
+			RunService.Heartbeat:Wait()
+		end
+	end
+
+	if isValidInstance(root) and isValidInstance(hum) and hum.Health > 0 then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		root.CFrame = targetCF
+		RunService.Heartbeat:Wait()
+		if isValidInstance(root) then
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
+		return true
+	end
+	return false
+end
+
+-- Poin #1: Pisahkan Logika TweenService dari Heartbeat Velocity
 local function moveCharacterTo(targetCF, forceInstantSnap)
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not root or not hum or hum.Health <= 0 then
-        State.IsGliding = false
-        return false
-    end
+	local char = LocalPlayer.Character
+	local root = isValidInstance(char) and char:FindFirstChild("HumanoidRootPart")
+	local hum = isValidInstance(char) and char:FindFirstChildOfClass("Humanoid")
+	if not isValidInstance(root) or not isValidInstance(hum) or hum.Health <= 0 then
+		State.IsGliding = false
+		return false
+	end
 
-    pcall(function()
-        LocalPlayer:RequestStreamAroundAsync(targetCF.Position, 2)
-    end)
+	if State.ActiveTween then
+		pcall(function() State.ActiveTween:Cancel() end)
+		State.ActiveTween = nil
+	end
 
-    if forceInstantSnap or Config.InstantSnapToEgg then
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
-        root.CFrame = targetCF
-        return true
-    end
+	local dist = (root.Position - targetCF.Position).Magnitude
+	if dist > 60 then
+		requestStreamSafe(targetCF.Position)
+	end
 
-    State.IsGliding = true
-    State.CancelGlide = false
+	if forceInstantSnap or Config.InstantSnapToEgg then
+		State.IsGliding = false
+		return safePositionCharacter(root, hum, targetCF)
+	end
 
-    local dist = (root.Position - targetCF.Position).Magnitude
-    local duration = math.clamp(dist / math.max(30, Config.GlideSpeed), 0.05, 1.35)
+	State.IsGliding = true
+	State.CancelGlide = false
+	if isValidInstance(SafePad) then
+		SafePad.CanCollide = false
+	end
 
-    local tw = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
-        CFrame = targetCF
-    })
-    tw:Play()
+	local prevAutoRotate = hum.AutoRotate
+	hum.AutoRotate = false
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	setNoclipMode(true)
 
-    local waited = 0
-    while waited < duration do
-        if State.CancelGlide or not root.Parent or hum.Health <= 0 then
-            tw:Cancel()
-            break
-        end
-        waited = waited + task.wait(0.02)
-    end
+	local duration = math.clamp(dist / math.max(30, Config.GlideSpeed), 0.05, 1.45)
+	local tw = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
+		CFrame = targetCF
+	})
+	State.ActiveTween = tw
+	tw:Play()
 
-    if root and root.Parent and not State.CancelGlide and hum.Health > 0 then
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.CFrame = targetCF
-    end
+	local startClock = tick()
+	while (tick() - startClock) < duration do
+		if State.CancelGlide or not isValidInstance(root) or not isValidInstance(hum) or hum.Health <= 0 then
+			pcall(function() tw:Cancel() end)
+			break
+		end
+		if tw.PlaybackState == Enum.PlaybackState.Completed or tw.PlaybackState == Enum.PlaybackState.Cancelled then
+			break
+		end
+		RunService.Heartbeat:Wait()
+	end
 
-    State.IsGliding = false
-    return true
+	State.ActiveTween = nil
+	State.IsGliding = false
+
+	if isValidInstance(hum) then
+		hum.AutoRotate = prevAutoRotate
+	end
+
+	if isValidInstance(root) and isValidInstance(hum) and not State.CancelGlide and hum.Health > 0 then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		root.CFrame = targetCF
+	end
+
+	if not Config.Noclip then
+		setNoclipMode(false)
+	end
+
+	return true
 end
 
--- INTI UTAMA V8: 6-Layer Hyper-Press yang Menembus Proteksi Pencet Game
 local function executeHyperPressGrab(eggItem)
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not root or not hum or hum.Health <= 0 then return false end
+	local char = LocalPlayer.Character
+	local root = isValidInstance(char) and char:FindFirstChild("HumanoidRootPart")
+	local hum = isValidInstance(char) and char:FindFirstChildOfClass("Humanoid")
+	if not isValidInstance(root) or not isValidInstance(hum) or hum.Health <= 0 then return false end
 
-    local eggObj = eggItem.Object
-    local part = eggItem.Part
-    if not eggObj or not part or not part.Parent then return false end
+	local eggObj = eggItem and eggItem.Object
+	local part = eggItem and eggItem.Part
+	if not isValidInstance(eggObj) or not isValidInstance(part) then return false end
 
-    -- LAYER 6: Lepas tool yang sedang dipegang agar tangan kosong & siap membawa telur
-    if Config.AutoUnequipTools then
-        pcall(function() hum:UnequipTools() end)
-    end
+	if Config.AutoUnequipTools then
+		pcall(function() hum:UnequipTools() end)
+	end
 
-    local initialCarry = countCarriedObjects()
+	local initialCarry = countCarriedObjects()
 
-    -- Kumpulkan semua ProximityPrompt di telur, parent, maupun radius 12 studs dari telur
-    local prompts = {}
-    local seenPrompt = {}
-    for _, d in ipairs(eggObj:GetDescendants()) do
-        if d:IsA("ProximityPrompt") and not seenPrompt[d] then
-            seenPrompt[d] = true
-            table.insert(prompts, d)
-        end
-    end
-    if eggObj.Parent then
-        for _, d in ipairs(eggObj.Parent:GetDescendants()) do
-            if d:IsA("ProximityPrompt") and not seenPrompt[d] then
-                seenPrompt[d] = true
-                table.insert(prompts, d)
-            end
-        end
-    end
-    for _, d in ipairs(Workspace:GetDescendants()) do
-        if d:IsA("ProximityPrompt") and not seenPrompt[d] then
-            local parentPart = d:FindFirstAncestorWhichIsA("BasePart") or (d:FindFirstAncestorOfClass("Model") and getPart(d:FindFirstAncestorOfClass("Model")))
-            if parentPart and (parentPart.Position - part.Position).Magnitude <= 10 then
-                seenPrompt[d] = true
-                table.insert(prompts, d)
-            end
-        end
-    end
+	local prompts = {}
+	local seenPrompt = {}
+	for _, d in ipairs(eggObj:GetDescendants()) do
+		if isValidInstance(d) and d:IsA("ProximityPrompt") and not seenPrompt[d] then
+			seenPrompt[d] = true
+			table.insert(prompts, d)
+		end
+	end
+	if isValidInstance(eggObj.Parent) and eggObj.Parent ~= Workspace then
+		for _, d in ipairs(eggObj.Parent:GetDescendants()) do
+			if isValidInstance(d) and d:IsA("ProximityPrompt") and not seenPrompt[d] then
+				seenPrompt[d] = true
+				table.insert(prompts, d)
+			end
+		end
+	end
+	for pr, _ in pairs(State.TrackedPrompts) do
+		if isValidInstance(pr) and not seenPrompt[pr] then
+			local parentPart = pr:FindFirstAncestorWhichIsA("BasePart")
+				or (pr:FindFirstAncestorOfClass("Model") and getPart(pr:FindFirstAncestorOfClass("Model")))
+			if isValidInstance(parentPart) and (parentPart.Position - part.Position).Magnitude <= 10 then
+				seenPrompt[pr] = true
+				table.insert(prompts, pr)
+			end
+		elseif not isValidInstance(pr) then
+			State.TrackedPrompts[pr] = nil
+		end
+	end
 
-    -- Baca durasi Hold asli server & buka kunci batas jarak/pandangan prompt
-    local serverHold = 0
-    for _, pr in ipairs(prompts) do
-        if State.PromptOrigHold[pr] == nil then
-            State.PromptOrigHold[pr] = pr.HoldDuration
-        end
-        if State.PromptOrigHold[pr] > serverHold then
-            serverHold = State.PromptOrigHold[pr]
-        end
-        pr.RequiresLineOfSight = false
-        pr.MaxActivationDistance = math.max(pr.MaxActivationDistance, 32)
-    end
+	local serverHold = 0
+	for _, pr in ipairs(prompts) do
+		if isValidInstance(pr) then
+			if State.PromptOrigHold[pr] == nil then
+				State.PromptOrigHold[pr] = pr.HoldDuration
+			end
+			if State.PromptOrigHold[pr] > serverHold then
+				serverHold = State.PromptOrigHold[pr]
+			end
+			pr.RequiresLineOfSight = false
+			pr.MaxActivationDistance = math.max(pr.MaxActivationDistance, 32)
+		end
+	end
 
-    -- LAYER 2: Berhenti Tepat di Samping Telur & Kunci Diam Sempurna (Jangan Di-Spam CFrame Lagi!)
-    setNoclipMode(false)
-    State.IsPressingEgg = true
+	setNoclipMode(false)
+	State.IsGliding = false
+	State.IsPressingEgg = true
 
-    local standPos = part.Position + Vector3.new(0, 1.5, 2.2)
-    local lookAtEggCF = CFrame.lookAt(standPos, part.Position)
-    SafePad.CFrame = CFrame.new(standPos.X, standPos.Y - 3.3, standPos.Z)
-    root.AssemblyLinearVelocity = Vector3.zero
-    root.AssemblyAngularVelocity = Vector3.zero
-    root.CFrame = lookAtEggCF
+	local standPos = part.Position + Vector3.new(0, 1.5, 2.2)
+	local lookAtEggCF = CFrame.lookAt(standPos, part.Position)
+	if isValidInstance(SafePad) then
+		SafePad.CanCollide = true
+		SafePad.CFrame = CFrame.new(standPos.X, standPos.Y - 3.3, standPos.Z)
+	end
+	safePositionCharacter(root, hum, lookAtEggCF)
 
-    -- LAYER 1: Arahkan Kamera Menghadap Tepat ke Telur agar Roblox Memunculkan Tombol Prompt di Layar!
-    if Config.AutoAimCameraToEgg then
-        local camPos = standPos + Vector3.new(0, 3.5, 6)
-        Camera.CFrame = CFrame.lookAt(camPos, part.Position)
-    end
+	if Config.AutoAimCameraToEgg and isValidInstance(Camera) then
+		local camPos = standPos + Vector3.new(0, 3.5, 6)
+		Camera.CFrame = CFrame.lookAt(camPos, part.Position)
+	end
 
-    -- Beri 2 frame agar mesin Roblox memicu event PromptShown secara resmi
-    RunService.Heartbeat:Wait()
-    RunService.Heartbeat:Wait()
+	RunService.Heartbeat:Wait()
+	RunService.Heartbeat:Wait()
 
-    if State.ActivePromptShown and not seenPrompt[State.ActivePromptShown] then
-        table.insert(prompts, State.ActivePromptShown)
-    end
+	if isValidInstance(State.ActivePromptShown) and not seenPrompt[State.ActivePromptShown] then
+		table.insert(prompts, State.ActivePromptShown)
+	end
 
-    -- Mulai Menahan Semua Prompt & Tombol E
-    for _, pr in ipairs(prompts) do
-        pcall(function() pr:InputHoldBegin() end)
-    end
-    pcall(function()
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-    end)
+	for _, pr in ipairs(prompts) do
+		if isValidInstance(pr) then
+			pcall(function() pr:InputHoldBegin() end)
+		end
+	end
+	ExecutorSafe.sendKeyEvent(true, Enum.KeyCode.E)
+	ExecutorSafe.fireTouchInterest(root, part)
 
-    -- Sentuh fisik telur sekali di awal
-    if firetouchinterest then
-        pcall(function()
-            firetouchinterest(root, part, 0)
-            firetouchinterest(root, part, 1)
-        end)
-    end
+	local startHold = tick()
+	local requiredWait = serverHold + Config.HoldBufferTime
+	local maxTimeout = math.max(Config.MaxGrabWaitTime, requiredWait + 0.8)
+	local grabConfirmed = false
 
-    local startHold = tick()
-    local requiredWait = serverHold + Config.HoldBufferTime
-    local maxTimeout = math.max(Config.MaxGrabWaitTime, requiredWait + 0.8)
-    local grabConfirmed = false
+	while (tick() - startHold) < maxTimeout do
+		if not State.ScriptAlive or not State.IsPressingEgg or not isValidInstance(root) or not isValidInstance(hum) or hum.Health <= 0 then
+			break
+		end
+		if not isValidInstance(part) then
+			grabConfirmed = true
+			break
+		end
 
-    while (tick() - startHold) < maxTimeout do
-        if not root.Parent or hum.Health <= 0 then break end
-        if not part or not part.Parent then
-            grabConfirmed = true
-            break
-        end
+		local elapsed = tick() - startHold
+		if isValidInstance(LiveStatus) and isValidInstance(eggObj) then
+			LiveStatus.Text = string.format(
+				"Hyper-Press [%s]: Menahan %.1fs / %.1fs...",
+				eggObj.Name, elapsed, requiredWait
+			)
+		end
 
-        local elapsed = tick() - startHold
-        LiveStatus.Text = string.format(
-            "Hyper-Press [%s]: Menahan %.1fs / %.1fs...",
-            eggObj.Name, elapsed, requiredWait
-        )
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
 
-        -- Pertahankan arah kamera ke telur tanpa mengubah CFrame karakter (agar tidak dianggap bergerak oleh server!)
-        root.AssemblyLinearVelocity = Vector3.zero
-        if Config.AutoAimCameraToEgg then
-            local camPos = root.Position + Vector3.new(0, 3.5, 6)
-            Camera.CFrame = CFrame.lookAt(camPos, part.Position)
-        end
+		if Config.AutoAimCameraToEgg and isValidInstance(Camera) then
+			local camPos = root.Position + Vector3.new(0, 3.5, 6)
+			Camera.CFrame = CFrame.lookAt(camPos, part.Position)
+		end
 
-        -- LAYER 3: Pencet tombol UI di layar HP (PlayerGui / ProximityPromptUI)
-        if Config.AutoTapPlayerGuiButtons then
-            local tapped = tapAllVisibleInteractButtons()
-            if tapped > 0 then
-                State.LastTriggerMethod = "UI Tap + Hold"
-            end
-        end
+		if Config.AutoTapPlayerGuiButtons then
+			local tapped = tapAllVisibleInteractButtons()
+			if tapped > 0 then
+				State.LastTriggerMethod = "UI Tap + Hold"
+			end
+		end
 
-        -- LAYER 4: ClickDetector & fireproximityprompt setelah durasi server terpenuhi
-        for _, cd in ipairs(eggObj:GetDescendants()) do
-            if cd:IsA("ClickDetector") and fireclickdetector then
-                pcall(function() fireclickdetector(cd) end)
-            end
-        end
+		if isValidInstance(eggObj) then
+			for _, cd in ipairs(eggObj:GetDescendants()) do
+				if isValidInstance(cd) and cd:IsA("ClickDetector") then
+					ExecutorSafe.fireClickDetector(cd)
+				end
+			end
+		end
 
-        if elapsed >= serverHold and Config.UseSignalAndPromptAPI then
-            for _, pr in ipairs(prompts) do
-                if fireproximityprompt then
-                    pcall(function() fireproximityprompt(pr) end)
-                end
-                if firesignal then
-                    pcall(function() firesignal(pr.Triggered, LocalPlayer) end)
-                end
-            end
-            State.LastTriggerMethod = "Prompt + Signal"
-        end
+		if elapsed >= serverHold and Config.UseSignalAndPromptAPI then
+			for _, pr in ipairs(prompts) do
+				if isValidInstance(pr) then
+					ExecutorSafe.fireProximityPrompt(pr)
+					ExecutorSafe.fireSignal(pr.Triggered, LocalPlayer)
+				end
+			end
+			State.LastTriggerMethod = "Prompt + Signal"
+		end
 
-        -- LAYER 5: Smart Remote Argument Fuzzer
-        if elapsed >= (serverHold * 0.5) then
-            fireSmartEggRemotes(eggObj, part, prompts[1])
-        end
+		if elapsed >= (serverHold * 0.5) then
+			fireSmartEggRemotes(eggObj, part, prompts[1])
+		end
 
-        -- Cek apakah telur sudah benar-benar menempel di karakter / masuk inventory!
-        if isEggGrabbedOrGone(eggObj, part, initialCarry) then
-            grabConfirmed = true
-            State.LastTriggerMethod = "6-Layer Verified!"
-            break
-        end
+		if isEggGrabbedOrGone(eggObj, part, initialCarry) then
+			grabConfirmed = true
+			State.LastTriggerMethod = "6-Layer Verified!"
+			break
+		end
 
-        task.wait(0.08)
-    end
+		task.wait(0.08)
+	end
 
-    -- Selesai menahan -> lepaskan InputHoldEnd & Tombol E
-    for _, pr in ipairs(prompts) do
-        pcall(function() pr:InputHoldEnd() end)
-        if fireproximityprompt then
-            pcall(function() fireproximityprompt(pr) end)
-        end
-    end
-    pcall(function()
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-    end)
+	for _, pr in ipairs(prompts) do
+		if isValidInstance(pr) then
+			pcall(function() pr:InputHoldEnd() end)
+			ExecutorSafe.fireProximityPrompt(pr)
+		end
+	end
+	ExecutorSafe.sendKeyEvent(false, Enum.KeyCode.E)
 
-    State.IsPressingEgg = false
-    State.VisitedEggs[eggObj] = tick() + Config.EggCooldownSec
-    return grabConfirmed
+	State.IsPressingEgg = false
+	if isValidInstance(eggObj) then
+		State.VisitedEggs[eggObj] = tick() + Config.EggCooldownSec
+	end
+	return grabConfirmed
 end
 
--- Fungsi Setor Telur ke Deposit Pad Base dengan 6-Layer Press juga!
 local function depositCarriedEggToBase()
-    local targetDeposit = Config.DepositPadCFrame or Config.BaseCFrame
-    if not targetDeposit then return end
+	local targetDeposit = Config.DepositPadCFrame or Config.BaseCFrame
+	if not targetDeposit then return end
 
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not root or not hum or hum.Health <= 0 then return end
+	local char = LocalPlayer.Character
+	local root = isValidInstance(char) and char:FindFirstChild("HumanoidRootPart")
+	local hum = isValidInstance(char) and char:FindFirstChildOfClass("Humanoid")
+	if not isValidInstance(root) or not isValidInstance(hum) or hum.Health <= 0 then return end
 
-    LiveStatus.Text = "Teleport ke Base & Menyetor Telur (Hyper-Deposit)..."
-    moveCharacterTo(targetDeposit + Vector3.new(0, 1.8, 0), Config.InstantSnapToBase)
-    setNoclipMode(false)
+	if isValidInstance(LiveStatus) then
+		LiveStatus.Text = "Teleport ke Base & Menyetor Telur (Hyper-Deposit)..."
+	end
+	moveCharacterTo(targetDeposit + Vector3.new(0, 1.8, 0), Config.InstantSnapToBase)
+	setNoclipMode(false)
 
-    local beforeCarry = countCarriedObjects()
-    local startDep = tick()
+	local beforeCarry = countCarriedObjects()
+	local startDep = tick()
 
-    while (tick() - startDep) < Config.DepositStayTime do
-        if not root.Parent or hum.Health <= 0 then break end
+	while (tick() - startDep) < Config.DepositStayTime do
+		if not State.ScriptAlive or not isValidInstance(root) or not isValidInstance(hum) or hum.Health <= 0 then
+			break
+		end
 
-        root.AssemblyLinearVelocity = Vector3.zero
-        if Config.AutoAimCameraToEgg then
-            Camera.CFrame = CFrame.lookAt(root.Position + Vector3.new(0, 5, 6), targetDeposit.Position)
-        end
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
 
-        -- Pencet tombol UI Setor/Place jika muncul di layar HP
-        if Config.AutoTapPlayerGuiButtons then
-            tapAllVisibleInteractButtons()
-        end
+		if Config.AutoAimCameraToEgg and isValidInstance(Camera) then
+			Camera.CFrame = CFrame.lookAt(root.Position + Vector3.new(0, 5, 6), targetDeposit.Position)
+		end
 
-        for _, obj in ipairs(Workspace:GetDescendants()) do
-            if obj:IsA("BasePart") and (obj.Position - targetDeposit.Position).Magnitude < 18 then
-                local n = string.lower(obj.Name)
-                if n:find("deposit") or n:find("place") or n:find("deliver") or n:find("drop") or n:find("pad") or n:find("collect") or n:find("base") or n:find("stand") then
-                    if firetouchinterest then
-                        pcall(function()
-                            firetouchinterest(root, obj, 0)
-                            firetouchinterest(root, obj, 1)
-                        end)
-                    end
-                end
-                local pr = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
-                if pr and pr.Enabled then
-                    pr.RequiresLineOfSight = false
-                    if fireproximityprompt then pcall(function() fireproximityprompt(pr) end) end
-                    pcall(function()
-                        pr:InputHoldBegin()
-                        task.wait(0.04)
-                        pr:InputHoldEnd()
-                    end)
-                end
-            end
-        end
+		if Config.AutoTapPlayerGuiButtons then
+			tapAllVisibleInteractButtons()
+		end
 
-        if countCarriedObjects() < beforeCarry then
-            break
-        end
+		for obj, _ in pairs(State.TrackedDepositPads) do
+			if isValidInstance(obj) then
+				if (obj.Position - targetDeposit.Position).Magnitude < 18 then
+					ExecutorSafe.fireTouchInterest(root, obj)
+					local pr = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+					if isValidInstance(pr) and pr.Enabled then
+						pr.RequiresLineOfSight = false
+						ExecutorSafe.fireProximityPrompt(pr)
+					end
+				end
+			else
+				State.TrackedDepositPads[obj] = nil
+			end
+		end
 
-        task.wait(0.08)
-    end
+		if countCarriedObjects() < beforeCarry then
+			break
+		end
 
-    State.CollectedCount = State.CollectedCount + 1
+		task.wait(0.08)
+	end
+
+	State.CollectedCount = State.CollectedCount + 1
 end
 
 -- ==========================================
@@ -1478,72 +2002,77 @@ end
 addSectionHeader(TabHyperPress, "Sistem Pencet Tembus Game (6-Layer V8)")
 
 addToggle(TabHyperPress, "Auto Steal + 6-Layer Hyper-Press (Utama)", Config.AutoFarmMove, function(val)
-    Config.AutoFarmMove = val
-    if val then
-        table.clear(State.VisitedEggs)
-        scanAllPlayerPlotsAndRemotes()
-        sendNotification("Hyper-Press V8 ON", "Kamera AimLock + Stop-Hold + UI Tap aktif!", 3)
-    else
-        State.CancelGlide = true
-        State.IsPressingEgg = false
-        if not Config.Noclip then setNoclipMode(false) end
-    end
+	Config.AutoFarmMove = val
+	if val then
+		table.clear(State.VisitedEggs)
+		scanAllPlayerPlotsAndRemotes()
+		sendNotification("Hyper-Press V8 ON", "Kamera AimLock + Stop-Hold + UI Tap aktif!", 3)
+	else
+		State.CancelGlide = true
+		State.IsGliding = false
+		State.IsPressingEgg = false
+		if State.ActiveTween then
+			pcall(function() State.ActiveTween:Cancel() end)
+			State.ActiveTween = nil
+		end
+		if not Config.Noclip then setNoclipMode(false) end
+	end
 end)
 
 addToggle(TabHyperPress, "Auto Pencet Saat Jalan Manual (Aura Grab)", Config.HyperPressAlwaysOn, function(val)
-    Config.HyperPressAlwaysOn = val
-    if val then
-        sendNotification("Aura Grab Aktif", "Dekati telur secara manual, otomatis terpencet!", 2.5)
-    end
+	Config.HyperPressAlwaysOn = val
+	if val then
+		sendNotification("Aura Grab Aktif", "Dekati telur secara manual, otomatis terpencet!", 2.5)
+	end
 end)
 
 addToggle(TabHyperPress, "Layer 1: Auto Arahkan Kamera ke Telur", Config.AutoAimCameraToEgg, function(val)
-    Config.AutoAimCameraToEgg = val
+	Config.AutoAimCameraToEgg = val
 end)
 
 addToggle(TabHyperPress, "Layer 2: Kunci Diam Saat Mencet (Anti-Batal)", Config.StopMovementWhilePressing, function(val)
-    Config.StopMovementWhilePressing = val
+	Config.StopMovementWhilePressing = val
 end)
 
 addToggle(TabHyperPress, "Layer 3: Auto-Tap Tombol UI Layar HP", Config.AutoTapPlayerGuiButtons, function(val)
-    Config.AutoTapPlayerGuiButtons = val
+	Config.AutoTapPlayerGuiButtons = val
 end)
 
 addToggle(TabHyperPress, "Layer 5: Smart Remote Argument Fuzzer", Config.SmartRemoteFuzzer, function(val)
-    Config.SmartRemoteFuzzer = val
+	Config.SmartRemoteFuzzer = val
 end)
 
 addButton(TabHyperPress, "TES PENCET PAKSA TELUR TERDEKAT SEKARANG", Themes[1].Primary, function()
-    task.spawn(function()
-        refreshEggCache()
-        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        if not root then return end
+	spawnManagedThread(function()
+		refreshEggCache()
+		local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+		if not isValidInstance(root) then return end
 
-        local nearest, minDist = nil, math.huge
-        for _, item in ipairs(State.EggCache) do
-            if item.Part then
-                local d = (root.Position - item.Part.Position).Magnitude
-                if d < minDist then
-                    minDist = d
-                    nearest = item
-                end
-            end
-        end
+		local nearest, minDist = nil, math.huge
+		for _, item in ipairs(State.EggCache) do
+			if isValidInstance(item.Part) then
+				local d = (root.Position - item.Part.Position).Magnitude
+				if d < minDist then
+					minDist = d
+					nearest = item
+				end
+			end
+		end
 
-        if nearest then
-            sendNotification("Tes Hyper-Press", "Mencoba mencet [" .. nearest.Object.Name .. "]...", 2.5)
-            moveCharacterTo(nearest.Part.CFrame + Vector3.new(0, 1.5, 2.2), false)
-            local ok = executeHyperPressGrab(nearest)
-            if ok then
-                sendNotification("BERHASIL!", "Telur berhasil terambil & terbawa!", 3)
-                depositCarriedEggToBase()
-            else
-                sendNotification("Info", "Sinyal pencet dikirim ke telur terdekat.", 2)
-            end
-        else
-            sendNotification("Info", "Tidak ada telur liar yang terdeteksi.", 2)
-        end
-    end)
+		if nearest and isValidInstance(nearest.Object) and isValidInstance(nearest.Part) then
+			sendNotification("Tes Hyper-Press", "Mencoba mencet [" .. nearest.Object.Name .. "]...", 2.5)
+			moveCharacterTo(nearest.Part.CFrame + Vector3.new(0, 1.5, 2.2), false)
+			local ok = executeHyperPressGrab(nearest)
+			if ok then
+				sendNotification("BERHASIL!", "Telur berhasil terambil & terbawa!", 3)
+				depositCarriedEggToBase()
+			else
+				sendNotification("Info", "Sinyal pencet dikirim ke telur terdekat.", 2)
+			end
+		else
+			sendNotification("Info", "Tidak ada telur liar yang terdeteksi.", 2)
+		end
+	end)
 end)
 
 -- [TAB 2: RARITY AREA (6 ZONA MAP ASLI)]
@@ -1551,401 +2080,480 @@ addSectionHeader(TabRarityArea, "Pilih Rarity Area Sesuai Map Asli")
 
 local AreaSelectBtn
 AreaSelectBtn = addButton(TabRarityArea, "Target: " .. RarityAreas[1].Name, RarityAreas[1].Color, function()
-    Config.SelectedAreaIndex = (Config.SelectedAreaIndex % #RarityAreas) + 1
-    local area = RarityAreas[Config.SelectedAreaIndex]
-    AreaSelectBtn.Text = "Target: " .. area.Name
-    AreaSelectBtn.BackgroundColor3 = area.Color
-    AreaSelectBtn.TextColor3 = Color3.fromRGB(15, 15, 20)
-    table.clear(State.VisitedEggs)
-    refreshEggCache()
-    sendNotification("Rarity Area Dipilih", "Target Area: " .. area.Name, 2.5)
+	Config.SelectedAreaIndex = (Config.SelectedAreaIndex % #RarityAreas) + 1
+	local area = RarityAreas[Config.SelectedAreaIndex]
+	AreaSelectBtn.Text = "Target: " .. area.Name
+	AreaSelectBtn.BackgroundColor3 = area.Color
+	AreaSelectBtn.TextColor3 = Color3.fromRGB(15, 15, 20)
+	table.clear(State.VisitedEggs)
+	refreshEggCache()
+	sendNotification("Rarity Area Dipilih", "Target Area: " .. area.Name, 2.5)
 end)
 AreaSelectBtn.TextColor3 = Color3.fromRGB(15, 15, 20)
 
 addToggle(TabRarityArea, "Auto Naik & Tunggu di Area (Load Map)", Config.AutoStandbyInArea, function(val)
-    Config.AutoStandbyInArea = val
+	Config.AutoStandbyInArea = val
 end)
 
 addToggle(TabRarityArea, "Hanya Ambil Rarity Sesuai Area Pilihan", Config.StrictAreaRarityMatch, function(val)
-    Config.StrictAreaRarityMatch = val
+	Config.StrictAreaRarityMatch = val
 end)
 
 addToggle(TabRarityArea, "Utamakan Rarity Tertinggi Lebih Dulu", Config.PrioritizeHighestRarity, function(val)
-    Config.PrioritizeHighestRarity = val
+	Config.PrioritizeHighestRarity = val
 end)
 
 addToggle(TabRarityArea, "Auto Sniper Mythic/Secret (Prioritas #1)", Config.AutoMythicSniper, function(val)
-    Config.AutoMythicSniper = val
+	Config.AutoMythicSniper = val
 end)
 
 for i = 2, #RarityAreas do
-    local zone = RarityAreas[i]
-    local zBtn = addButton(TabRarityArea, "Teleport ke " .. zone.Name, zone.Color, function()
-        task.spawn(function()
-            calibrateMapRarityAreas()
-            local cf = State.ZoneCheckpoints[zone.Id]
-            if cf then moveCharacterTo(cf, false) end
-        end)
-    end)
-    zBtn.TextColor3 = Color3.fromRGB(15, 15, 20)
+	local zone = RarityAreas[i]
+	local zBtn = addButton(TabRarityArea, "Teleport ke " .. zone.Name, zone.Color, function()
+		spawnManagedThread(function()
+			calibrateMapRarityAreas()
+			local cf = State.ZoneCheckpoints[zone.Id]
+			if cf then moveCharacterTo(cf, false) end
+		end)
+	end)
+	zBtn.TextColor3 = Color3.fromRGB(15, 15, 20)
 end
 
 -- [TAB 3: BASE & TITIK DEPOSIT]
 addSectionHeader(TabBaseTele, "Pengaturan Titik Setor (Deposit Pad) Base")
 
 addButton(TabBaseTele, "Simpan Posisi Berdiri Sebagai TITIK DEPOSIT BASE", Color3.fromRGB(0, 210, 130), function()
-    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    if root then
-        Config.DepositPadCFrame = root.CFrame
-        Config.BaseCFrame = root.CFrame
-        sendNotification("Titik Deposit Disimpan!", "Telur yang dibawa akan langsung disetor ke titik ini.", 3)
-    end
+	local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	if isValidInstance(root) then
+		Config.DepositPadCFrame = root.CFrame
+		Config.BaseCFrame = root.CFrame
+		sendNotification("Titik Deposit Disimpan!", "Telur yang dibawa akan langsung disetor ke titik ini.", 3)
+	end
 end)
 
 addButton(TabBaseTele, "Setor Telur ke Base Sekarang", Color3.fromRGB(0, 185, 235), function()
-    task.spawn(function()
-        depositCarriedEggToBase()
-    end)
+	spawnManagedThread(function()
+		depositCarriedEggToBase()
+	end)
 end)
 
 addButton(TabBaseTele, "Naik ke LEVEL FINAL (Puncak Tertinggi)", Color3.fromRGB(255, 50, 105), function()
-    task.spawn(function()
-        calibrateMapRarityAreas()
-        local finalCF = State.ZoneCheckpoints[5]
-        if finalCF then moveCharacterTo(finalCF, false) end
-    end)
+	spawnManagedThread(function()
+		calibrateMapRarityAreas()
+		local finalCF = State.ZoneCheckpoints[5]
+		if finalCF then moveCharacterTo(finalCF, false) end
+	end)
 end)
 
 addToggle(TabBaseTele, "Blokir Semua Plot Pemain Lain (Anti-Nyasar)", Config.IgnoreOtherPlayerPlots, function(val)
-    Config.IgnoreOtherPlayerPlots = val
-    refreshEggCache()
+	Config.IgnoreOtherPlayerPlots = val
+	refreshEggCache()
 end)
 
 -- [TAB 4: PLAYER & FLY]
 addSectionHeader(TabPlayer, "Kecepatan, Lompatan & Berjalan di Udara")
 
 addSlider(TabPlayer, "Kecepatan Terbang ke Egg (Glide Speed)", 40, 220, Config.GlideSpeed, function(val)
-    Config.GlideSpeed = val
+	Config.GlideSpeed = val
 end)
 
 addToggle(TabPlayer, "Aktifkan Speed Boost (Lari Cepat)", Config.SpeedBoost, function(val)
-    Config.SpeedBoost = val
-    if not val then
-        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if hum then hum.WalkSpeed = 16 end
-    end
+	Config.SpeedBoost = val
+	if not val then
+		local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+		if isValidInstance(hum) then hum.WalkSpeed = 16 end
+	end
 end)
 
 addSlider(TabPlayer, "Atur WalkSpeed", 16, 230, Config.WalkSpeed, function(val)
-    Config.WalkSpeed = val
+	Config.WalkSpeed = val
 end)
 
 addToggle(TabPlayer, "Aktifkan High Jump (Lompat Tinggi)", Config.HighJump, function(val)
-    Config.HighJump = val
-    if not val then
-        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if hum then hum.JumpPower = 50 end
-    end
+	Config.HighJump = val
+	if not val then
+		local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+		if isValidInstance(hum) then hum.JumpPower = 50 end
+	end
 end)
 
 addToggle(TabPlayer, "Infinite Jump (Lompat Udara)", Config.InfJump, function(val)
-    Config.InfJump = val
+	Config.InfJump = val
 end)
 
 addToggle(TabPlayer, "Air Walk (Berjalan di Udara)", Config.AirWalkFloat, function(val)
-    Config.AirWalkFloat = val
-    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    State.AirWalkY = (val and root) and (root.Position.Y - 3.35) or nil
+	Config.AirWalkFloat = val
+	local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	State.AirWalkY = (val and isValidInstance(root)) and (root.Position.Y - 3.35) or nil
 end)
 
 addToggle(TabPlayer, "Noclip Manual (Tembus Tembok)", Config.Noclip, function(val)
-    Config.Noclip = val
-    setNoclipMode(val)
+	Config.Noclip = val
+	setNoclipMode(val)
 end)
 
 -- [TAB 5: ESP & DEBUG INSPECTOR]
 addSectionHeader(TabVisualESP, "ESP Wild Egg & Inspector Tombol")
 
 addToggle(TabVisualESP, "ESP Highlight + Label Rarity Area", Config.ESP, function(val)
-    Config.ESP = val
-    if not val then
-        for _, v in ipairs(Workspace:GetDescendants()) do
-            if v.Name == "V8EggESP" or v.Name == "V8EggTag" then v:Destroy() end
-        end
-    end
+	Config.ESP = val
+	if not val then
+		for obj, _ in pairs(State.TrackedCandidates) do
+			if isValidInstance(obj) then
+				local hl = obj:FindFirstChild("V8EggESP")
+				if isValidInstance(hl) then hl:Destroy() end
+				local p = getPart(obj)
+				if isValidInstance(p) then
+					local tg = p:FindFirstChild("V8EggTag")
+					if isValidInstance(tg) then tg:Destroy() end
+				end
+			end
+		end
+	end
 end)
 
 addButton(TabVisualESP, "Cek Jumlah Remote & Prompt di Map (Diagnosa)", Color3.fromRGB(90, 120, 220), function()
-    scanAllPlayerPlotsAndRemotes()
-    local promptCount = 0
-    for _, v in ipairs(Workspace:GetDescendants()) do
-        if v:IsA("ProximityPrompt") then promptCount = promptCount + 1 end
-    end
-    sendNotification(
-        "Hasil Diagnosa Map",
-        string.format("Prompt: %d | Remote Egg: %d | Plot Diblokir: %d", promptCount, #State.EggRemotes, #State.PlotCenters),
-        4
-    )
+	scanAllPlayerPlotsAndRemotes()
+	local promptCount = 0
+	for pr, _ in pairs(State.TrackedPrompts) do
+		if isValidInstance(pr) then promptCount = promptCount + 1 end
+	end
+	sendNotification(
+		"Hasil Diagnosa Map",
+		string.format("Prompt: %d | Remote Egg: %d | Plot Diblokir: %d", promptCount, #State.EggRemotes, #State.PlotCenters),
+		4
+	)
 end)
 
 addToggle(TabVisualESP, "Fullbright (Terang Tanpa Kabut)", Config.Fullbright, function(val)
-    Config.Fullbright = val
-    if val then
-        Lighting.Brightness = 2.5
-        Lighting.ClockTime = 14
-        Lighting.FogEnd = 100000
-        Lighting.GlobalShadows = false
-    else
-        Lighting.Brightness = State.DefaultLighting.Brightness
-        Lighting.ClockTime = State.DefaultLighting.ClockTime
-        Lighting.FogEnd = State.DefaultLighting.FogEnd
-        Lighting.GlobalShadows = State.DefaultLighting.GlobalShadows
-    end
+	Config.Fullbright = val
+	if val then
+		Lighting.Brightness = 2.5
+		Lighting.ClockTime = 14
+		Lighting.FogEnd = 100000
+		Lighting.GlobalShadows = false
+	else
+		Lighting.Brightness = State.DefaultLighting.Brightness
+		Lighting.ClockTime = State.DefaultLighting.ClockTime
+		Lighting.FogEnd = State.DefaultLighting.FogEnd
+		Lighting.GlobalShadows = State.DefaultLighting.GlobalShadows
+	end
 end)
 
 -- [TAB 6: BYPASS & TEMA ANIME]
 addSectionHeader(TabBypassUI, "Pengaman & Kustomisasi Tema")
 
 addToggle(TabBypassUI, "Velocity Zero Stabilizer (Anti-Tarik Server)", Config.VelocityBypass, function(val)
-    Config.VelocityBypass = val
+	Config.VelocityBypass = val
 end)
 
 addToggle(TabBypassUI, "Anti-Admin (Auto Pause Saat Ada Mod)", Config.AntiAdmin, function(val)
-    Config.AntiAdmin = val
+	Config.AntiAdmin = val
 end)
 
 addToggle(TabBypassUI, "Anti-Void (Penyelamat Jatuh)", Config.AntiVoid, function(val)
-    Config.AntiVoid = val
+	Config.AntiVoid = val
 end)
 
 addButton(TabBypassUI, "Ganti Tema: " .. Themes[1].Name, nil, function(btn)
-    Config.ThemeIndex = (Config.ThemeIndex % #Themes) + 1
-    local th = Themes[Config.ThemeIndex]
-    MainFrame.BackgroundColor3 = th.Bg
-    Header.BackgroundColor3 = th.Card
-    Sidebar.BackgroundColor3 = th.Card
-    WallpaperImg.Image = th.Image
-    LiveStatus.TextColor3 = th.Primary
-    MinBtn.BackgroundColor3 = th.Primary
-    FloatOrb.BackgroundColor3 = th.Bg
-    FloatOrb.TextColor3 = th.Primary
-    OrbStroke.Color = th.Primary
-    MainGrad.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, th.Primary),
-        ColorSequenceKeypoint.new(0.5, th.Secondary),
-        ColorSequenceKeypoint.new(1, th.Primary)
-    })
-    btn.Text = "Ganti Tema: " .. th.Name
+	Config.ThemeIndex = (Config.ThemeIndex % #Themes) + 1
+	local th = Themes[Config.ThemeIndex]
+	MainFrame.BackgroundColor3 = th.Bg
+	Header.BackgroundColor3 = th.Card
+	Sidebar.BackgroundColor3 = th.Card
+	WallpaperImg.Image = th.Image
+	LiveStatus.TextColor3 = th.Primary
+	MinBtn.BackgroundColor3 = th.Primary
+	FloatOrb.BackgroundColor3 = th.Bg
+	FloatOrb.TextColor3 = th.Primary
+	OrbStroke.Color = th.Primary
+	MainGrad.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, th.Primary),
+		ColorSequenceKeypoint.new(0.5, th.Secondary),
+		ColorSequenceKeypoint.new(1, th.Primary)
+	})
+	btn.Text = "Ganti Tema: " .. th.Name
 end)
 
-MinBtn.MouseButton1Click:Connect(function()
-    MainFrame.Visible = false
-    FloatOrb.Visible = true
-end)
-FloatOrb.MouseButton1Click:Connect(function()
-    FloatOrb.Visible = false
-    MainFrame.Visible = true
-end)
+addGlobalConn(MinBtn.MouseButton1Click:Connect(function()
+	MainFrame.Visible = false
+	FloatOrb.Visible = true
+end), "MinBtnClick")
+
+addGlobalConn(FloatOrb.MouseButton1Click:Connect(function()
+	FloatOrb.Visible = false
+	MainFrame.Visible = true
+end), "OrbBtnClick")
 
 -- ==========================================
--- 9. RUNTIME LOOPS (6-LAYER HYPER-PRESS & AURA GRAB)
+-- 9. RUNTIME LOOPS & RESET MUTLAK KARAKTER
 -- ==========================================
-LocalPlayer.CharacterAdded:Connect(function()
-    State.IsGliding = false
-    State.IsPressingEgg = false
-    State.CancelGlide = false
-    table.clear(State.OriginalCollide)
-end)
+-- Poin #8: Reset Mutlak State Flag saat Humanoid.Died atau CharacterAdded
+local function forceResetCharacterState()
+	State.CancelGlide = true
+	State.IsGliding = false
+	State.IsPressingEgg = false
+	State.IsFuzzingRemotes = false
 
-RunService.Heartbeat:Connect(function()
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not root or not hum then return end
+	if State.ActiveTween then
+		pcall(function() State.ActiveTween:Cancel() end)
+		State.ActiveTween = nil
+	end
 
-    if (State.IsGliding or State.IsPressingEgg or Config.AutoFarmMove) and Config.VelocityBypass then
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
-    end
+	ExecutorSafe.sendKeyEvent(false, Enum.KeyCode.E)
+	if isValidInstance(State.ActivePromptShown) then
+		pcall(function() State.ActivePromptShown:InputHoldEnd() end)
+	end
 
-    if Config.AirWalkFloat and State.AirWalkY then
-        SafePad.CFrame = CFrame.new(root.Position.X, State.AirWalkY, root.Position.Z)
-    elseif (State.IsGliding or State.IsPressingEgg or Config.AutoFarmMove) and Config.FloatPadBypass then
-        SafePad.CFrame = root.CFrame * CFrame.new(0, -3.35, 0)
-    else
-        SafePad.CFrame = CFrame.new(0, -9999, 0)
-    end
+	if isValidInstance(SafePad) then
+		SafePad.CanCollide = false
+		SafePad.CFrame = CFrame.new(0, -9999, 0)
+	end
 
-    if Config.AntiVoid and root.Position.Y < (Workspace.FallenPartsDestroyHeight + 30) then
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.CFrame = (Config.BaseCFrame or CFrame.new(0, 35, 0)) + Vector3.new(0, 4, 0)
-    end
+	table.clear(State.OriginalCollide)
+end
 
-    if Config.SpeedBoost then hum.WalkSpeed = Config.WalkSpeed end
-    if Config.HighJump then
-        hum.UseJumpPower = true
-        hum.JumpPower = Config.JumpPower
-    end
-end)
+local function setupCharacterLifecycle(char)
+	cleanupCharacterConnections()
+	forceResetCharacterState()
+	if not isValidInstance(char) then return end
 
-RunService.Stepped:Connect(function()
-    -- Hanya Noclip saat sedang terbang meluncur; saat mencet telur kolisi harus ON agar server menerima interaksi!
-    if Config.Noclip or (State.IsGliding and not State.IsPressingEgg) then
-        setNoclipMode(true)
-    end
-end)
+	spawnManagedThread(function()
+		local hum = char:WaitForChild("Humanoid", 10)
+		if isValidInstance(hum) then
+			addCharConn(hum.Died:Connect(function()
+				forceResetCharacterState()
+			end), "HumanoidDied")
+		end
+		task.wait(0.5)
+		recordStarterTools()
+	end)
+end
 
-UserInputService.JumpRequest:Connect(function()
-    if Config.InfJump then
-        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
-    end
-end)
+if isValidInstance(LocalPlayer.Character) then
+	setupCharacterLifecycle(LocalPlayer.Character)
+end
 
--- Loop Aura Grab (Jika pemain ingin jalan manual tapi tombol pencet otomatis bekerja saat dekat telur)
-task.spawn(function()
-    while task.wait(0.15) do
-        if Config.HyperPressAlwaysOn and not Config.AutoFarmMove then
-            pcall(function()
-                if State.ActivePromptShown then
-                    local pr = State.ActivePromptShown
-                    pr.RequiresLineOfSight = false
-                    pcall(function() pr:InputHoldBegin() end)
-                    if fireproximityprompt then
-                        pcall(function() fireproximityprompt(pr) end)
-                    end
-                    tapAllVisibleInteractButtons()
-                end
-            end)
-        end
-    end
+addGlobalConn(LocalPlayer.CharacterAdded:Connect(function(char)
+	setupCharacterLifecycle(char)
+end), "CharAdded")
+
+addGlobalConn(LocalPlayer.CharacterRemoving:Connect(function()
+	cleanupCharacterConnections()
+	forceResetCharacterState()
+end), "CharRemoving")
+
+-- Poin #1: Loop Heartbeat Terpisah dari TweenService
+addGlobalConn(RunService.Heartbeat:Connect(function()
+	local char = LocalPlayer.Character
+	if not isValidInstance(char) then return end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not isValidInstance(root) or not isValidInstance(hum) or hum.Health <= 0 then return end
+
+	-- Jangan sentuh AssemblyLinearVelocity saat State.IsGliding == true agar tidak konflik dengan TweenService
+	if Config.VelocityBypass and not State.IsGliding then
+		if State.IsPressingEgg or Config.AutoFarmMove then
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+
+	if isValidInstance(SafePad) then
+		if Config.AirWalkFloat and State.AirWalkY and not State.IsGliding then
+			SafePad.CanCollide = true
+			SafePad.CFrame = CFrame.new(root.Position.X, State.AirWalkY, root.Position.Z)
+		elseif State.IsPressingEgg and Config.FloatPadBypass and not State.IsGliding then
+			SafePad.CanCollide = true
+			SafePad.CFrame = root.CFrame * CFrame.new(0, -3.35, 0)
+		else
+			SafePad.CanCollide = false
+			SafePad.CFrame = CFrame.new(0, -9999, 0)
+		end
+	end
+
+	if Config.AntiVoid and root.Position.Y < (Workspace.FallenPartsDestroyHeight + 30) then
+		forceResetCharacterState()
+		safePositionCharacter(root, hum, (Config.BaseCFrame or CFrame.new(0, 35, 0)) + Vector3.new(0, 4, 0))
+	end
+
+	if Config.SpeedBoost and not State.IsPressingEgg and not State.IsGliding then
+		hum.WalkSpeed = Config.WalkSpeed
+	end
+	if Config.HighJump then
+		hum.UseJumpPower = true
+		hum.JumpPower = Config.JumpPower
+	end
+end), "MainHeartbeat")
+
+addGlobalConn(RunService.Stepped:Connect(function()
+	if Config.Noclip or (State.IsGliding and not State.IsPressingEgg) then
+		setNoclipMode(true)
+	end
+end), "MainStepped")
+
+addGlobalConn(UserInputService.JumpRequest:Connect(function()
+	if Config.InfJump and not State.IsPressingEgg then
+		local char = LocalPlayer.Character
+		local hum = isValidInstance(char) and char:FindFirstChildOfClass("Humanoid")
+		if isValidInstance(hum) and hum.Health > 0 then
+			hum:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end
+end), "JumpReq")
+
+-- Loop Aura Grab
+spawnManagedThread(function()
+	while State.ScriptAlive and task.wait(0.18) do
+		if Config.HyperPressAlwaysOn and not Config.AutoFarmMove and not State.IsPressingEgg then
+			pcall(function()
+				local pr = State.ActivePromptShown
+				if isValidInstance(pr) and pr.Enabled then
+					pr.RequiresLineOfSight = false
+					ExecutorSafe.fireProximityPrompt(pr)
+					tapAllVisibleInteractButtons()
+				end
+			end)
+		end
+	end
 end)
 
 local function selectBestWildEgg(rootPos)
-    refreshEggCache()
-    local chosenArea = RarityAreas[Config.SelectedAreaIndex]
-    local bestEgg = nil
-    local highestMetric = -math.huge
+	refreshEggCache()
+	local chosenArea = RarityAreas[Config.SelectedAreaIndex] or RarityAreas[1]
+	local bestEgg = nil
+	local highestMetric = -math.huge
 
-    for _, item in ipairs(State.EggCache) do
-        if item.Object and item.Object.Parent and item.Part then
-            local isMythicOverride = Config.AutoMythicSniper and (item.RarityId >= 5)
-            local isAreaMatch = false
+	for _, item in ipairs(State.EggCache) do
+		if isValidInstance(item.Object) and isValidInstance(item.Part) then
+			local isMythicOverride = Config.AutoMythicSniper and (item.RarityId >= 5)
+			local isAreaMatch = false
 
-            if chosenArea.Id == 0 or isMythicOverride then
-                isAreaMatch = true
-            elseif Config.StrictAreaRarityMatch then
-                isAreaMatch = (item.RarityId == chosenArea.Id)
-            else
-                isAreaMatch = (item.RarityId == chosenArea.Id) or (item.ZoneId == chosenArea.Id)
-            end
+			if chosenArea.Id == 0 or isMythicOverride then
+				isAreaMatch = true
+			elseif Config.StrictAreaRarityMatch then
+				isAreaMatch = (item.RarityId == chosenArea.Id)
+			else
+				isAreaMatch = (item.RarityId == chosenArea.Id) or (item.ZoneId == chosenArea.Id)
+			end
 
-            if isAreaMatch then
-                local dist = (rootPos - item.Part.Position).Magnitude
-                local metric = Config.PrioritizeHighestRarity and ((item.RarityId * 25000) - dist) or (-dist)
-                if metric > highestMetric then
-                    highestMetric = metric
-                    bestEgg = item
-                end
-            end
-        end
-    end
+			if isAreaMatch then
+				local dist = (rootPos - item.Part.Position).Magnitude
+				local metric = Config.PrioritizeHighestRarity and ((item.RarityId * 25000) - dist) or (-dist)
+				if metric > highestMetric then
+					highestMetric = metric
+					bestEgg = item
+				end
+			end
+		end
+	end
 
-    return bestEgg, chosenArea
+	return bestEgg, chosenArea
 end
 
 -- Loop Utama Auto Steal + 6-Layer Hyper-Press
-task.spawn(function()
-    while task.wait(0.25) do
-        if Config.AutoFarmMove and not State.AdminDetected then
-            pcall(function()
-                local char = LocalPlayer.Character
-                local root = char and char:FindFirstChild("HumanoidRootPart")
-                local hum = char and char:FindFirstChildOfClass("Humanoid")
-                if not root or not hum or hum.Health <= 0 then return end
+spawnManagedThread(function()
+	while State.ScriptAlive and task.wait(0.25) do
+		if Config.AutoFarmMove and not State.AdminDetected then
+			pcall(function()
+				local char = LocalPlayer.Character
+				local root = isValidInstance(char) and char:FindFirstChild("HumanoidRootPart")
+				local hum = isValidInstance(char) and char:FindFirstChildOfClass("Humanoid")
+				if not isValidInstance(root) or not isValidInstance(hum) or hum.Health <= 0 then return end
 
-                local bestEgg, chosenArea = selectBestWildEgg(root.Position)
-                if bestEgg and bestEgg.Part then
-                    State.CycleCount = State.CycleCount + 1
-                    LiveStatus.Text = string.format("Menuju [%s] %s...", bestEgg.Tag, bestEgg.Object.Name)
+				local bestEgg, chosenArea = selectBestWildEgg(root.Position)
+				if bestEgg and isValidInstance(bestEgg.Object) and isValidInstance(bestEgg.Part) then
+					State.CycleCount = State.CycleCount + 1
+					if isValidInstance(LiveStatus) then
+						LiveStatus.Text = string.format("Menuju [%s] %s...", bestEgg.Tag, bestEgg.Object.Name)
+					end
 
-                    -- 1. Terbang ke depan telur
-                    local approachPos = bestEgg.Part.Position + Vector3.new(0, 1.5, 2.2)
-                    moveCharacterTo(CFrame.lookAt(approachPos, bestEgg.Part.Position), Config.InstantSnapToEgg)
+					local approachPos = bestEgg.Part.Position + Vector3.new(0, 1.5, 2.2)
+					local arrived = moveCharacterTo(CFrame.lookAt(approachPos, bestEgg.Part.Position), Config.InstantSnapToEgg)
 
-                    -- 2. Eksekusi 6-Layer Hyper-Press (Kamera AimLock + Berhenti Diam + UI Tap + Hold + Remote)
-                    executeHyperPressGrab(bestEgg)
+					if arrived and Config.AutoFarmMove and isValidInstance(hum) and hum.Health > 0 then
+						executeHyperPressGrab(bestEgg)
+					end
 
-                    -- 3. Bawa pulang ke Base & Setor
-                    if Config.AutoFarmMove then
-                        depositCarriedEggToBase()
-                    end
-                else
-                    local standbyCF = Config.CustomStandbyCFrame or (chosenArea.Id > 0 and State.ZoneCheckpoints[chosenArea.Id])
-                    if Config.AutoStandbyInArea and standbyCF then
-                        if (root.Position - standbyCF.Position).Magnitude > 30 then
-                            LiveStatus.Text = "Naik ke " .. chosenArea.ShortName .. " (Memuat Area)..."
-                            moveCharacterTo(standbyCF, false)
-                        else
-                            LiveStatus.Text = "Standby di " .. chosenArea.ShortName .. " (Menunggu Wild Egg)..."
-                        end
-                    end
-                end
-            end)
-        end
-    end
+					if Config.AutoFarmMove and isValidInstance(hum) and hum.Health > 0 then
+						depositCarriedEggToBase()
+					end
+				else
+					local standbyCF = Config.CustomStandbyCFrame or (chosenArea.Id > 0 and State.ZoneCheckpoints[chosenArea.Id])
+					if Config.AutoStandbyInArea and standbyCF and isValidInstance(root) then
+						if (root.Position - standbyCF.Position).Magnitude > 30 then
+							if isValidInstance(LiveStatus) then
+								LiveStatus.Text = "Naik ke " .. chosenArea.ShortName .. " (Memuat Area)..."
+							end
+							moveCharacterTo(standbyCF, false)
+						else
+							if isValidInstance(LiveStatus) then
+								LiveStatus.Text = "Standby di " .. chosenArea.ShortName .. " (Menunggu Wild Egg)..."
+							end
+						end
+					end
+				end
+			end)
+		end
+	end
 end)
 
--- Loop ESP Wild Egg
-task.spawn(function()
-    while task.wait(0.8) do
-        if Config.ESP then
-            pcall(function()
-                refreshEggCache()
-                local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-                for _, item in ipairs(State.EggCache) do
-                    local obj, part = item.Object, item.Part
-                    if obj and part then
-                        if not obj:FindFirstChild("V8EggESP") then
-                            local hl = Instance.new("Highlight", obj)
-                            hl.Name = "V8EggESP"
-                            hl.FillColor = item.Color
-                            hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-                            hl.FillTransparency = 0.38
-                        end
+-- Loop ESP Wild Egg (Berbasis Cache & Validasi Instance Ketat)
+spawnManagedThread(function()
+	while State.ScriptAlive and task.wait(0.8) do
+		if Config.ESP then
+			pcall(function()
+				refreshEggCache()
+				local char = LocalPlayer.Character
+				local root = isValidInstance(char) and char:FindFirstChild("HumanoidRootPart")
+				for _, item in ipairs(State.EggCache) do
+					local obj, part = item.Object, item.Part
+					if isValidInstance(obj) and isValidInstance(part) then
+						if not obj:FindFirstChild("V8EggESP") then
+							local hl = Instance.new("Highlight", obj)
+							hl.Name = "V8EggESP"
+							hl.FillColor = item.Color
+							hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+							hl.FillTransparency = 0.38
+						end
 
-                        local tag = part:FindFirstChild("V8EggTag")
-                        if not tag then
-                            tag = Instance.new("BillboardGui", part)
-                            tag.Name = "V8EggTag"
-                            tag.Size = UDim2.new(0, 150, 0, 36)
-                            tag.StudsOffset = Vector3.new(0, 3.2, 0)
-                            tag.AlwaysOnTop = true
+						local tag = part:FindFirstChild("V8EggTag")
+						if not isValidInstance(tag) then
+							tag = Instance.new("BillboardGui", part)
+							tag.Name = "V8EggTag"
+							tag.Size = UDim2.new(0, 150, 0, 36)
+							tag.StudsOffset = Vector3.new(0, 3.2, 0)
+							tag.AlwaysOnTop = true
 
-                            local txt = Instance.new("TextLabel", tag)
-                            txt.Name = "Info"
-                            txt.Size = UDim2.new(1, 0, 1, 0)
-                            txt.BackgroundTransparency = 1
-                            txt.Font = Enum.Font.GothamBlack
-                            txt.TextColor3 = item.Color
-                            txt.TextStrokeTransparency = 0.15
-                            txt.TextSize = 11
-                        end
+							local txt = Instance.new("TextLabel", tag)
+							txt.Name = "Info"
+							txt.Size = UDim2.new(1, 0, 1, 0)
+							txt.BackgroundTransparency = 1
+							txt.Font = Enum.Font.GothamBlack
+							txt.TextColor3 = item.Color
+							txt.TextStrokeTransparency = 0.15
+							txt.TextSize = 11
+						end
 
-                        local dist = root and math.floor((root.Position - part.Position).Magnitude) or 0
-                        tag.Info.Text = string.format("[%s]\n%s (%dm)", item.Tag, obj.Name, dist)
-                    end
-                end
-            end)
-        end
-    end
+						local infoLbl = tag:FindFirstChild("Info")
+						if isValidInstance(infoLbl) then
+							local dist = isValidInstance(root) and math.floor((root.Position - part.Position).Magnitude) or 0
+							infoLbl.Text = string.format("[%s]\n%s (%dm)", item.Tag, obj.Name, dist)
+						end
+					end
+				end
+			end)
+		end
+	end
 end)
 
-LocalPlayer.Idled:Connect(function()
-    if Config.AntiAFK then
-        VirtualUser:CaptureController()
-        VirtualUser:ClickButton2(Vector2.new())
-    end
-end)
+addGlobalConn(LocalPlayer.Idled:Connect(function()
+	if Config.AntiAFK then
+		pcall(function()
+			VirtualUser:CaptureController()
+			VirtualUser:ClickButton2(Vector2.new())
+		end)
+	end
+end), "AntiAFK")
 
-sendNotification("Anime Overdrive V8 Ready", "6-Layer Hyper-Press Engine siap digunakan!", 3.5)
+sendNotification("Anime Overdrive V8 Ready", "10 Perbaikan Sistemik Aktif & Siap AFK!", 3.5)
