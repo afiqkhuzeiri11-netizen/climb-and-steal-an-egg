@@ -1,0 +1,933 @@
+repeat task.wait() until game:IsLoaded()
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local VirtualUser = game:GetService("VirtualUser")
+local LocalPlayer = Players.LocalPlayer
+
+local ParentGui = (gethui and gethui()) or game:GetService("CoreGui")
+if ParentGui:FindFirstChild("AnimeClimbEggHub") then
+    ParentGui.AnimeClimbEggHub:Destroy()
+end
+
+-- ==========================================
+-- 1. KONFIGURASI, RARITY & TEMA ANIME
+-- ==========================================
+local RarityList = {
+    {Name = "Semua (All)", MinScore = 1, Color = Color3.fromRGB(200, 200, 200)},
+    {Name = "Rare Ke Atas", MinScore = 2, Color = Color3.fromRGB(0, 170, 255)},
+    {Name = "Epic Ke Atas", MinScore = 3, Color = Color3.fromRGB(180, 70, 255)},
+    {Name = "Legendary Ke Atas", MinScore = 4, Color = Color3.fromRGB(255, 190, 0)},
+    {Name = "Mythic / Secret", MinScore = 5, Color = Color3.fromRGB(255, 45, 95)}
+}
+
+local AnimeWallpapers = {
+    {Name = "Cyber Anime", Id = "rbxassetid://13702592662", Tint = Color3.fromRGB(255, 90, 180)},
+    {Name = "Darkaura Shinobi", Id = "rbxassetid://11379207198", Tint = Color3.fromRGB(0, 210, 255)},
+    {Name = "Crimson Eclipse", Id = "rbxassetid://12639562957", Tint = Color3.fromRGB(255, 60, 80)},
+    {Name = "Void Starlight", Id = "rbxassetid://9067253165", Tint = Color3.fromRGB(165, 90, 255)}
+}
+
+local Config = {
+    AutoSteal = false,
+    AutoReturnBase = false,
+    PrioritizeHighestRarity = true,
+    RarityIndex = 1,
+    WallpaperIndex = 1,
+    ClimbSpeed = 55,
+    SafeVelocityBypass = true,
+    SegmentedBypass = true,
+    AntiAdmin = true,
+    AntiVoid = true,
+    AntiAFK = true,
+    Noclip = true,
+    ESP = false,
+    SpeedBoost = false,
+    WalkSpeed = 75,
+    InfJump = false,
+    HighJump = false,
+    JumpPower = 110,
+    SavedBaseCFrame = nil
+}
+
+local EggCache = {}
+local ActiveTween = nil
+local IsFarmingAction = false
+local AdminPaused = false
+
+-- Simpan posisi awal sebagai Base/Spawn default
+task.spawn(function()
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local root = char:WaitForChild("HumanoidRootPart", 10)
+    if root and not Config.SavedBaseCFrame then
+        Config.SavedBaseCFrame = root.CFrame
+    end
+end)
+
+-- ==========================================
+-- 2. SISTEM DRAG SENTUH & PC
+-- ==========================================
+local function makeDraggable(triggerFrame, moveFrame)
+    local dragging, dragInput, dragStart, startPos
+    triggerFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = moveFrame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    triggerFrame.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            moveFrame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+-- ==========================================
+-- 3. PEMBUATAN GUI ANIME EDITION (4 TAB)
+-- ==========================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AnimeClimbEggHub"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = ParentGui
+
+-- Tombol Floating saat Minimize
+local FloatBtn = Instance.new("TextButton")
+FloatBtn.Parent = ScreenGui
+FloatBtn.Size = UDim2.new(0, 56, 0, 56)
+FloatBtn.Position = UDim2.new(0.04, 0, 0.22, 0)
+FloatBtn.BackgroundColor3 = Color3.fromRGB(22, 16, 32)
+FloatBtn.Font = Enum.Font.GothamBlack
+FloatBtn.Text = "ANIME\nHUB"
+FloatBtn.TextColor3 = Color3.fromRGB(255, 105, 195)
+FloatBtn.TextSize = 11
+FloatBtn.Visible = false
+Instance.new("UICorner", FloatBtn).CornerRadius = UDim.new(1, 0)
+
+local FloatStroke = Instance.new("UIStroke", FloatBtn)
+FloatStroke.Color = Color3.fromRGB(255, 90, 180)
+FloatStroke.Thickness = 2.2
+makeDraggable(FloatBtn, FloatBtn)
+
+-- Frame Utama
+local MainFrame = Instance.new("Frame")
+MainFrame.Parent = ScreenGui
+MainFrame.BackgroundColor3 = Color3.fromRGB(16, 14, 24)
+MainFrame.Position = UDim2.new(0.5, -185, 0.5, -155)
+MainFrame.Size = UDim2.new(0, 370, 0, 310)
+MainFrame.ClipsDescendants = true
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 14)
+
+local MainStroke = Instance.new("UIStroke", MainFrame)
+MainStroke.Thickness = 2.5
+MainStroke.Color = Color3.fromRGB(255, 255, 255)
+
+local BorderGrad = Instance.new("UIGradient", MainStroke)
+BorderGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 75, 175)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(130, 80, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 225, 255))
+})
+BorderGrad.Rotation = 35
+
+-- Latar Belakang Gambar Anime
+local BgImage = Instance.new("ImageLabel")
+BgImage.Parent = MainFrame
+BgImage.Size = UDim2.new(1, 0, 1, 0)
+BgImage.BackgroundTransparency = 1
+BgImage.Image = AnimeWallpapers[1].Id
+BgImage.ImageTransparency = 0.55
+BgImage.ScaleType = Enum.ScaleType.Crop
+BgImage.ZIndex = 1
+Instance.new("UICorner", BgImage).CornerRadius = UDim.new(0, 14)
+
+-- Lapisan Gelap Transparan Agar Teks Jelas
+local DarkOverlay = Instance.new("Frame")
+DarkOverlay.Parent = MainFrame
+DarkOverlay.Size = UDim2.new(1, 0, 1, 0)
+DarkOverlay.BackgroundColor3 = Color3.fromRGB(12, 10, 20)
+DarkOverlay.BackgroundTransparency = 0.35
+DarkOverlay.BorderSizePixel = 0
+DarkOverlay.ZIndex = 2
+Instance.new("UICorner", DarkOverlay).CornerRadius = UDim.new(0, 14)
+
+-- Header Bar
+local Header = Instance.new("Frame")
+Header.Parent = MainFrame
+Header.BackgroundColor3 = Color3.fromRGB(24, 18, 38)
+Header.BackgroundTransparency = 0.2
+Header.Size = UDim2.new(1, 0, 0, 42)
+Header.ZIndex = 3
+Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 14)
+makeDraggable(Header, MainFrame)
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Parent = Header
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Position = UDim2.new(0, 14, 0, 3)
+TitleLabel.Size = UDim2.new(0.75, 0, 0, 20)
+TitleLabel.Font = Enum.Font.GothamBlack
+TitleLabel.Text = "CLIMB & STEAL AN EGG [ANIME FINAL]"
+TitleLabel.TextColor3 = Color3.fromRGB(255, 240, 250)
+TitleLabel.TextSize = 12
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.ZIndex = 4
+
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Parent = Header
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Position = UDim2.new(0, 14, 0, 22)
+StatusLabel.Size = UDim2.new(0.75, 0, 0, 16)
+StatusLabel.Font = Enum.Font.GothamMedium
+StatusLabel.Text = "Status: Bypass Aktif | Siap Digunakan"
+StatusLabel.TextColor3 = Color3.fromRGB(0, 235, 255)
+StatusLabel.TextSize = 10
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.ZIndex = 4
+
+local MinBtn = Instance.new("TextButton")
+MinBtn.Parent = Header
+MinBtn.BackgroundColor3 = Color3.fromRGB(255, 70, 160)
+MinBtn.Position = UDim2.new(1, -36, 0.5, -13)
+MinBtn.Size = UDim2.new(0, 26, 0, 26)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.Text = "—"
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.TextSize = 12
+MinBtn.ZIndex = 4
+Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0, 7)
+
+-- Panel Navigasi Tab (Kiri)
+local TabPanel = Instance.new("Frame")
+TabPanel.Parent = MainFrame
+TabPanel.BackgroundColor3 = Color3.fromRGB(20, 16, 32)
+TabPanel.BackgroundTransparency = 0.25
+TabPanel.Position = UDim2.new(0, 8, 0, 50)
+TabPanel.Size = UDim2.new(0, 95, 1, -58)
+TabPanel.ZIndex = 3
+Instance.new("UICorner", TabPanel).CornerRadius = UDim.new(0, 10)
+
+local TabListLayout = Instance.new("UIListLayout", TabPanel)
+TabListLayout.Padding = UDim.new(0, 6)
+TabListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+TabListLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+
+local TabPad = Instance.new("UIPadding", TabPanel)
+TabPad.PaddingTop = UDim.new(0, 8)
+
+-- Kontainer Halaman Tab (Kanan)
+local PageContainer = Instance.new("Frame")
+PageContainer.Parent = MainFrame
+PageContainer.BackgroundTransparency = 1
+PageContainer.Position = UDim2.new(0, 110, 0, 50)
+PageContainer.Size = UDim2.new(1, -118, 1, -58)
+PageContainer.ZIndex = 3
+
+local Pages = {}
+local TabButtons = {}
+
+local function createTab(tabName)
+    local Btn = Instance.new("TextButton")
+    Btn.Parent = TabPanel
+    Btn.Size = UDim2.new(0.88, 0, 0, 34)
+    Btn.BackgroundColor3 = Color3.fromRGB(35, 28, 52)
+    Btn.BackgroundTransparency = 0.2
+    Btn.Font = Enum.Font.GothamBold
+    Btn.Text = tabName
+    Btn.TextColor3 = Color3.fromRGB(200, 195, 220)
+    Btn.TextSize = 11
+    Btn.ZIndex = 4
+    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 7)
+
+    local Page = Instance.new("ScrollingFrame")
+    Page.Parent = PageContainer
+    Page.Size = UDim2.new(1, 0, 1, 0)
+    Page.BackgroundTransparency = 1
+    Page.ScrollBarThickness = 3
+    Page.ScrollBarImageColor3 = Color3.fromRGB(255, 90, 180)
+    Page.BorderSizePixel = 0
+    Page.Visible = false
+    Page.ZIndex = 4
+
+    local PageLayout = Instance.new("UIListLayout", Page)
+    PageLayout.Padding = UDim.new(0, 7)
+    PageLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+    PageLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        Page.CanvasSize = UDim2.new(0, 0, 0, PageLayout.AbsoluteContentSize.Y + 12)
+    end)
+
+    Btn.MouseButton1Click:Connect(function()
+        for _, p in ipairs(Pages) do p.Visible = false end
+        for _, b in ipairs(TabButtons) do
+            b.BackgroundColor3 = Color3.fromRGB(35, 28, 52)
+            b.TextColor3 = Color3.fromRGB(200, 195, 220)
+        end
+        Page.Visible = true
+        Btn.BackgroundColor3 = Color3.fromRGB(255, 70, 165)
+        Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    end)
+
+    table.insert(Pages, Page)
+    table.insert(TabButtons, Btn)
+    return Page
+end
+
+local TabEgg = createTab("Auto Egg")
+local TabFinal = createTab("Level Final")
+local TabPlayer = createTab("Player & ESP")
+local TabSafe = createTab("Bypass & UI")
+
+-- Aktifkan Tab pertama secara default
+Pages[1].Visible = true
+TabButtons[1].BackgroundColor3 = Color3.fromRGB(255, 70, 165)
+TabButtons[1].TextColor3 = Color3.fromRGB(255, 255, 255)
+
+-- Komponen UI Builder (Toggle & Action Button)
+local function addToggle(parentPage, labelText, defaultState, callback)
+    local Row = Instance.new("Frame")
+    Row.Parent = parentPage
+    Row.BackgroundColor3 = Color3.fromRGB(26, 20, 42)
+    Row.BackgroundTransparency = 0.15
+    Row.Size = UDim2.new(0.96, 0, 0, 36)
+    Row.ZIndex = 5
+    Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 8)
+
+    local Txt = Instance.new("TextLabel")
+    Txt.Parent = Row
+    Txt.BackgroundTransparency = 1
+    Txt.Position = UDim2.new(0, 10, 0, 0)
+    Txt.Size = UDim2.new(0.7, 0, 1, 0)
+    Txt.Font = Enum.Font.GothamSemibold
+    Txt.Text = labelText
+    Txt.TextColor3 = Color3.fromRGB(240, 235, 255)
+    Txt.TextSize = 11
+    Txt.TextXAlignment = Enum.TextXAlignment.Left
+    Txt.ZIndex = 6
+
+    local Switch = Instance.new("TextButton")
+    Switch.Parent = Row
+    Switch.Position = UDim2.new(1, -48, 0.5, -10)
+    Switch.Size = UDim2.new(0, 38, 0, 20)
+    Switch.Text = ""
+    Switch.ZIndex = 6
+    Instance.new("UICorner", Switch).CornerRadius = UDim.new(1, 0)
+
+    local Dot = Instance.new("Frame")
+    Dot.Parent = Switch
+    Dot.Size = UDim2.new(0, 14, 0, 14)
+    Dot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Dot.ZIndex = 7
+    Instance.new("UICorner", Dot).CornerRadius = UDim.new(1, 0)
+
+    local state = defaultState
+    local function update()
+        Switch.BackgroundColor3 = state and Color3.fromRGB(255, 75, 175) or Color3.fromRGB(55, 48, 75)
+        Dot.Position = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+    end
+    update()
+
+    Switch.MouseButton1Click:Connect(function()
+        state = not state
+        update()
+        callback(state)
+    end)
+end
+
+local function addButton(parentPage, btnText, accentColor, callback)
+    local Btn = Instance.new("TextButton")
+    Btn.Parent = parentPage
+    Btn.BackgroundColor3 = accentColor or Color3.fromRGB(95, 60, 220)
+    Btn.BackgroundTransparency = 0.1
+    Btn.Size = UDim2.new(0.96, 0, 0, 34)
+    Btn.Font = Enum.Font.GothamBold
+    Btn.Text = btnText
+    Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Btn.TextSize = 11
+    Btn.ZIndex = 5
+    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 8)
+
+    Btn.MouseButton1Click:Connect(function()
+        callback(Btn)
+    end)
+    return Btn
+end
+
+-- ==========================================
+-- 4. DETEKSI RARITY & LEVEL FINAL (PUNCAK)
+-- ==========================================
+local function getPart(obj)
+    if not obj then return nil end
+    if obj:IsA("BasePart") then return obj end
+    if obj:IsA("Model") then
+        return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+    end
+    return nil
+end
+
+local function parseEggRarity(eggObj)
+    local combinedText = string.lower(eggObj.Name)
+    if eggObj.Parent then
+        combinedText = combinedText .. " " .. string.lower(eggObj.Parent.Name)
+    end
+
+    -- Cek Attribute Rarity
+    for attrName, attrVal in pairs(eggObj:GetAttributes()) do
+        if type(attrVal) == "string" then
+            combinedText = combinedText .. " " .. string.lower(attrVal)
+        end
+    end
+
+    -- Cek teks di dalam BillboardGui / TextLabel pada Telur
+    for _, desc in ipairs(eggObj:GetDescendants()) do
+        if desc:IsA("TextLabel") or desc:IsA("StringValue") then
+            local val = desc:IsA("TextLabel") and desc.Text or desc.Value
+            combinedText = combinedText .. " " .. string.lower(tostring(val))
+        end
+    end
+
+    if combinedText:find("secret") or combinedText:find("mythic") or combinedText:find("divine") or combinedText:find("god") or combinedText:find("anime") or combinedText:find("void") then
+        return 5, "MYTHIC/SECRET", Color3.fromRGB(255, 45, 95)
+    elseif combinedText:find("legend") or combinedText:find("gold") or combinedText:find("dragon") or combinedText:find("royal") then
+        return 4, "LEGENDARY", Color3.fromRGB(255, 195, 0)
+    elseif combinedText:find("epic") or combinedText:find("crystal") or combinedText:find("demon") or combinedText:find("dark") then
+        return 3, "EPIC", Color3.fromRGB(185, 75, 255)
+    elseif combinedText:find("rare") or combinedText:find("uncommon") or combinedText:find("silver") or combinedText:find("blue") then
+        return 2, "RARE", Color3.fromRGB(0, 180, 255)
+    else
+        return 1, "COMMON", Color3.fromRGB(210, 210, 210)
+    end
+end
+
+local function isEggCandidate(obj)
+    if not obj or not obj.Parent then return false end
+    local char = LocalPlayer.Character
+    if char and obj:IsDescendantOf(char) then return false end
+    if obj:IsA("Model") or obj:IsA("BasePart") then
+        local n = string.lower(obj.Name)
+        local p = obj.Parent and string.lower(obj.Parent.Name) or ""
+        if n:find("egg") or p:find("egg") or obj:FindFirstChildWhichIsA("ProximityPrompt", true) and (n:find("pet") or n:find("nest") or p:find("spawn")) then
+            local part = getPart(obj)
+            if part and part.Size.Magnitude < 60 then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function scanEggs()
+    table.clear(EggCache)
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if isEggCandidate(obj) then
+            local score, label, col = parseEggRarity(obj)
+            table.insert(EggCache, {
+                Object = obj,
+                Part = getPart(obj),
+                Score = score,
+                RarityName = label,
+                Color = col
+            })
+        end
+    end
+end
+
+-- Mencari Posisi Puncak / Level Final di Map
+local function findFinalSummitCFrame()
+    local highestY = -math.huge
+    local bestPart = nil
+
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            local n = string.lower(obj.Name)
+            local p = obj.Parent and string.lower(obj.Parent.Name) or ""
+            -- Prioritaskan objek bertuliskan final/top/summit/end/nest dengan posisi tinggi
+            if (n:find("final") or n:find("summit") or n:find("top") or n:find("win") or n:find("nest") or n:find("egg") or p:find("stage") or p:find("checkpoint")) then
+                if obj.Position.Y > highestY and obj.Position.Y < 50000 and obj.Size.Magnitude < 300 then
+                    highestY = obj.Position.Y
+                    bestPart = obj
+                end
+            end
+        end
+    end
+
+    -- Jika tidak ada nama khusus, ambil posisi telur paling tinggi di map
+    if not bestPart then
+        scanEggs()
+        for _, data in ipairs(EggCache) do
+            if data.Part and data.Part.Position.Y > highestY then
+                highestY = data.Part.Position.Y
+                bestPart = data.Part
+            end
+        end
+    end
+
+    if bestPart then
+        return bestPart.CFrame + Vector3.new(0, 4, 0), math.floor(highestY)
+    end
+    return nil, 0
+end
+
+-- ==========================================
+-- 5. SISTEM BYPASS & PERGERAKAN ANTI-RUBBERBAND
+-- ==========================================
+-- Platform Kaki Tak Terlihat (Mencegah deteksi jatuh / freefall anti-cheat)
+local FloatPad = Instance.new("Part")
+FloatPad.Name = "SafeStepPad"
+FloatPad.Size = Vector3.new(6, 1, 6)
+FloatPad.Transparency = 1
+FloatPad.Anchored = true
+FloatPad.CanCollide = true
+FloatPad.Parent = Workspace
+
+RunService.Heartbeat:Connect(function()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum then return end
+
+    -- Stabilizer Kecepatan Fisika saat Sedang Tween / Climb
+    if IsFarmingAction and Config.SafeVelocityBypass then
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        FloatPad.CFrame = root.CFrame * CFrame.new(0, -3.4, 0)
+    else
+        FloatPad.CFrame = CFrame.new(0, -9999, 0)
+    end
+
+    -- Anti-Void (Pengaman jika jatuh ke bawah map)
+    if Config.AntiVoid and root.Position.Y < (Workspace.FallenPartsDestroyHeight + 25) then
+        if Config.SavedBaseCFrame then
+            root.CFrame = Config.SavedBaseCFrame + Vector3.new(0, 3, 0)
+        else
+            root.CFrame = CFrame.new(0, 50, 0)
+        end
+        root.AssemblyLinearVelocity = Vector3.zero
+    end
+
+    -- Speed & Jump Override
+    if Config.SpeedBoost then hum.WalkSpeed = Config.WalkSpeed end
+    if Config.HighJump then
+        hum.UseJumpPower = true
+        hum.JumpPower = Config.JumpPower
+    end
+end)
+
+-- Noclip saat meluncur
+RunService.Stepped:Connect(function()
+    local char = LocalPlayer.Character
+    if char and (Config.Noclip and (IsFarmingAction or Config.AutoSteal)) then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide and part ~= FloatPad then
+                part.CanCollide = false
+            end
+        end
+    end
+end)
+
+-- Fungsi Meluncur Bertahap (Segmented Tween Bypass untuk jarak jauh/tinggi)
+local function safeGlideTo(targetCFrame)
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+
+    IsFarmingAction = true
+    local startPos = root.Position
+    local targetPos = targetCFrame.Position
+    local totalDist = (targetPos - startPos).Magnitude
+
+    if Config.SegmentedBypass and totalDist > 120 then
+        local steps = math.ceil(totalDist / 90)
+        for i = 1, steps do
+            if AdminPaused then break end
+            local alpha = i / steps
+            local nextPos = startPos:Lerp(targetPos, alpha)
+            local stepDist = (root.Position - nextPos).Magnitude
+            local stepTime = math.clamp(stepDist / Config.ClimbSpeed, 0.1, 1.8)
+
+            ActiveTween = TweenService:Create(root, TweenInfo.new(stepTime, Enum.EasingStyle.Linear), {
+                CFrame = CFrame.new(nextPos)
+            })
+            ActiveTween:Play()
+            ActiveTween.Completed:Wait()
+            task.wait(0.04) -- Jeda sinkronisasi server
+        end
+    else
+        local duration = math.clamp(totalDist / Config.ClimbSpeed, 0.08, 3.0)
+        ActiveTween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
+            CFrame = targetCFrame
+        })
+        ActiveTween:Play()
+        ActiveTween.Completed:Wait()
+    end
+
+    root.CFrame = targetCFrame
+    IsFarmingAction = false
+    return true
+end
+
+-- Fungsi Interaksi Mengambil & Klaim Telur ke Inventory
+local function executeEggSteal(eggObj)
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local part = getPart(eggObj)
+    if not root or not part then return end
+
+    -- 1. Pemicu ProximityPrompt (Instan tanpa tahan tombol)
+    for _, desc in ipairs(eggObj:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") then
+            desc.HoldDuration = 0
+            if fireproximityprompt then
+                pcall(function() fireproximityprompt(desc) end)
+            end
+        end
+    end
+    if eggObj.Parent then
+        local parentPrompt = eggObj.Parent:FindFirstChildWhichIsA("ProximityPrompt")
+        if parentPrompt then
+            parentPrompt.HoldDuration = 0
+            if fireproximityprompt then
+                pcall(function() fireproximityprompt(parentPrompt) end)
+            end
+        end
+    end
+
+    -- 2. Pemicu Sentuhan Fisik (TouchInterest)
+    if firetouchinterest then
+        pcall(function()
+            firetouchinterest(root, part, 0)
+            task.wait(0.03)
+            firetouchinterest(root, part, 1)
+        end)
+    end
+
+    -- 3. Pemicu ClickDetector
+    local clicker = eggObj:FindFirstChildWhichIsA("ClickDetector", true)
+    if clicker and fireclickdetector then
+        pcall(function() fireclickdetector(clicker) end)
+    end
+
+    -- 4. Pemicu RemoteEvent Steal/Collect
+    for _, rem in ipairs(ReplicatedStorage:GetDescendants()) do
+        if rem:IsA("RemoteEvent") then
+            local rn = string.lower(rem.Name)
+            if rn:find("steal") or rn:find("collect") or rn:find("grab") or rn:find("pickup") or rn:find("claim") then
+                pcall(function() rem:FireServer(eggObj) end)
+            end
+        end
+    end
+end
+
+-- ==========================================
+-- 6. PENGISIAN TOMBOL DI 4 TAB MENU
+-- ==========================================
+-- [TAB 1: AUTO EGG & RARITY]
+addToggle(TabEgg, "Auto Climb & Steal Egg", Config.AutoSteal, function(val)
+    Config.AutoSteal = val
+    if not val then IsFarmingAction = false end
+end)
+
+addToggle(TabEgg, "Auto Balik ke Base (Deposit)", Config.AutoReturnBase, function(val)
+    Config.AutoReturnBase = val
+end)
+
+addToggle(TabEgg, "Incar Rarity Tertinggi Dulu", Config.PrioritizeHighestRarity, function(val)
+    Config.PrioritizeHighestRarity = val
+end)
+
+local RarityBtn
+RarityBtn = addButton(TabEgg, "Filter Rarity: Semua (All)", RarityList[1].Color, function()
+    Config.RarityIndex = (Config.RarityIndex % #RarityList) + 1
+    local current = RarityList[Config.RarityIndex]
+    RarityBtn.Text = "Filter Rarity: " .. current.Name
+    RarityBtn.BackgroundColor3 = current.Color
+    RarityBtn.TextColor3 = Color3.fromRGB(20, 20, 25)
+    StatusLabel.Text = "Filter Diubah: " .. current.Name
+end)
+RarityBtn.TextColor3 = Color3.fromRGB(20, 20, 25)
+
+addButton(TabEgg, "Ambil 1 Telur Terbaik Sekarang", Color3.fromRGB(255, 75, 165), function()
+    task.spawn(function()
+        scanEggs()
+        local minReq = RarityList[Config.RarityIndex].MinScore
+        local best = nil
+        for _, item in ipairs(EggCache) do
+            if item.Part and item.Score >= minReq then
+                if not best or item.Score > best.Score then
+                    best = item
+                end
+            end
+        end
+        if best and best.Part then
+            StatusLabel.Text = "Mengambil [" .. best.RarityName .. "] " .. best.Object.Name
+            safeGlideTo(best.Part.CFrame + Vector3.new(0, 2.5, 0))
+            executeEggSteal(best.Object)
+        else
+            StatusLabel.Text = "Tidak ada telur sesuai filter saat ini!"
+        end
+    end)
+end)
+
+-- [TAB 2: LEVEL FINAL & TELEPORT]
+addButton(TabFinal, "Naik ke LEVEL FINAL (Puncak)", Color3.fromRGB(255, 60, 130), function()
+    task.spawn(function()
+        local finalCF, heightY = findFinalSummitCFrame()
+        if finalCF then
+            StatusLabel.Text = "Meluncur ke Level Final (" .. tostring(heightY) .. "m)..."
+            safeGlideTo(finalCF)
+            StatusLabel.Text = "Tiba di Level Final!"
+        else
+            StatusLabel.Text = "Titik Level Final belum terdeteksi!"
+        end
+    end)
+end)
+
+addButton(TabFinal, "Kembali ke Base / Spawn (Deposit)", Color3.fromRGB(0, 180, 230), function()
+    task.spawn(function()
+        if Config.SavedBaseCFrame then
+            StatusLabel.Text = "Kembali ke Base..."
+            safeGlideTo(Config.SavedBaseCFrame + Vector3.new(0, 2, 0))
+            StatusLabel.Text = "Tiba di Base!"
+        end
+    end)
+end)
+
+addButton(TabFinal, "Simpan Posisi Base Saat Ini", Color3.fromRGB(80, 100, 220), function()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root then
+        Config.SavedBaseCFrame = root.CFrame
+        StatusLabel.Text = "Posisi Base baru berhasil disimpan!"
+    end
+end)
+
+addButton(TabFinal, "Instant Hold Prompt (0 Detik)", Color3.fromRGB(140, 70, 240), function()
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        if v:IsA("ProximityPrompt") then
+            v.HoldDuration = 0
+        end
+    end
+    StatusLabel.Text = "Semua tombol ambil telur menjadi 0 detik!"
+end)
+
+-- [TAB 3: PLAYER & ESP RARITY]
+addToggle(TabPlayer, "ESP Egg + Label Rarity", Config.ESP, function(val)
+    Config.ESP = val
+    if not val then
+        for _, v in ipairs(Workspace:GetDescendants()) do
+            if v.Name == "AnimeEggESP" or v.Name == "AnimeEggTag" then
+                v:Destroy()
+            end
+        end
+    end
+end)
+
+addToggle(TabPlayer, "Speed Boost (Lari Cepat)", Config.SpeedBoost, function(val)
+    Config.SpeedBoost = val
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum and not val then hum.WalkSpeed = 16 end
+end)
+
+addToggle(TabPlayer, "High Jump (Lompat Tinggi)", Config.HighJump, function(val)
+    Config.HighJump = val
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum and not val then hum.JumpPower = 50 end
+end)
+
+addToggle(TabPlayer, "Infinite Jump (Lompat Udara)", Config.InfJump, function(val)
+    Config.InfJump = val
+end)
+
+-- [TAB 4: PENGAMAN, BYPASS & TEMA ANIME]
+addToggle(TabSafe, "Velocity Bypass (Anti-Tarik Server)", Config.SafeVelocityBypass, function(val)
+    Config.SafeVelocityBypass = val
+end)
+
+addToggle(TabSafe, "Segmented Climb (Bypass Jarak Jauh)", Config.SegmentedBypass, function(val)
+    Config.SegmentedBypass = val
+end)
+
+addToggle(TabSafe, "Anti-Admin (Auto Pause Farm)", Config.AntiAdmin, function(val)
+    Config.AntiAdmin = val
+end)
+
+addToggle(TabSafe, "Anti-Void (Pengaman Jatuh)", Config.AntiVoid, function(val)
+    Config.AntiVoid = val
+end)
+
+addButton(TabSafe, "Ganti Wallpaper Anime: Cyber Anime", Color3.fromRGB(220, 65, 160), function(btn)
+    Config.WallpaperIndex = (Config.WallpaperIndex % #AnimeWallpapers) + 1
+    local wp = AnimeWallpapers[Config.WallpaperIndex]
+    BgImage.Image = wp.Id
+    FloatStroke.Color = wp.Tint
+    btn.Text = "Wallpaper: " .. wp.Name
+end)
+
+-- Minimize & Restore
+MinBtn.MouseButton1Click:Connect(function()
+    MainFrame.Visible = false
+    FloatBtn.Visible = true
+end)
+
+FloatBtn.MouseButton1Click:Connect(function()
+    FloatBtn.Visible = false
+    MainFrame.Visible = true
+end)
+
+-- Infinite Jump Handler
+UserInputService.JumpRequest:Connect(function()
+    if Config.InfJump then
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end
+end)
+
+-- Otomatis 0 Detik setiap ada ProximityPrompt baru muncul
+ProximityPromptService.PromptButtonHoldBegan:Connect(function(prompt)
+    prompt.HoldDuration = 0
+    if fireproximityprompt then
+        pcall(function() fireproximityprompt(prompt) end)
+    end
+end)
+
+-- ==========================================
+-- 7. DETEKSI ADMIN & LOOP UTAMA AUTO FARM
+-- ==========================================
+local function verifyAdminSafety()
+    if not Config.AntiAdmin then
+        AdminPaused = false
+        return
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local n = string.lower(plr.Name)
+            if n:find("admin") or n:find("mod") or n:find("dev") or n:find("owner") then
+                AdminPaused = true
+                StatusLabel.Text = "PAUSE AMAN: Admin Terdeteksi di Server!"
+                return
+            end
+        end
+    end
+    AdminPaused = false
+end
+
+Players.PlayerAdded:Connect(verifyAdminSafety)
+Players.PlayerRemoving:Connect(verifyAdminSafety)
+
+-- Loop Utama Auto Climb & Steal Egg
+task.spawn(function()
+    while task.wait(0.35) do
+        if Config.AutoSteal and not AdminPaused then
+            pcall(function()
+                local char = LocalPlayer.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if not root or not hum or hum.Health <= 0 then return end
+
+                scanEggs()
+                local minScore = RarityList[Config.RarityIndex].MinScore
+                local chosenEgg = nil
+                local bestMetric = -math.huge
+
+                for _, data in ipairs(EggCache) do
+                    if data.Object and data.Object.Parent and data.Part and data.Score >= minScore then
+                        local dist = (root.Position - data.Part.Position).Magnitude
+                        -- Jika prioritas rarity aktif, utamakan skor rarity tertinggi lalu jarak terdekat
+                        local metric = Config.PrioritizeHighestRarity and ((data.Score * 10000) - dist) or (-dist)
+                        if metric > bestMetric then
+                            bestMetric = metric
+                            chosenEgg = data
+                        end
+                    end
+                end
+
+                if chosenEgg and chosenEgg.Part then
+                    StatusLabel.Text = "Mencuri [" .. chosenEgg.RarityName .. "] " .. chosenEgg.Object.Name
+                    safeGlideTo(chosenEgg.Part.CFrame + Vector3.new(0, 2.5, 0))
+                    executeEggSteal(chosenEgg.Object)
+                    task.wait(0.25)
+
+                    -- Jika Auto Return Base aktif, langsung antar telur kembali ke base
+                    if Config.AutoReturnBase and Config.SavedBaseCFrame then
+                        StatusLabel.Text = "Mengantar telur kembali ke Base..."
+                        safeGlideTo(Config.SavedBaseCFrame + Vector3.new(0, 2.5, 0))
+                        task.wait(0.4)
+                    end
+                else
+                    StatusLabel.Text = "Menunggu telur [" .. RarityList[Config.RarityIndex].Name .. "] spawn..."
+                end
+            end)
+        end
+    end
+end)
+
+-- Loop Visual ESP + Label Rarity
+task.spawn(function()
+    while task.wait(1.2) do
+        if Config.ESP then
+            pcall(function()
+                scanEggs()
+                for _, data in ipairs(EggCache) do
+                    local obj = data.Object
+                    local part = data.Part
+                    if obj and part then
+                        if not obj:FindFirstChild("AnimeEggESP") then
+                            local hl = Instance.new("Highlight")
+                            hl.Name = "AnimeEggESP"
+                            hl.FillColor = data.Color
+                            hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+                            hl.FillTransparency = 0.35
+                            hl.Parent = obj
+                        end
+                        if not part:FindFirstChild("AnimeEggTag") then
+                            local bb = Instance.new("BillboardGui")
+                            bb.Name = "AnimeEggTag"
+                            bb.Size = UDim2.new(0, 120, 0, 30)
+                            bb.StudsOffset = Vector3.new(0, 3, 0)
+                            bb.AlwaysOnTop = true
+                            bb.Parent = part
+
+                            local lbl = Instance.new("TextLabel", bb)
+                            lbl.Size = UDim2.new(1, 0, 1, 0)
+                            lbl.BackgroundTransparency = 1
+                            lbl.Font = Enum.Font.GothamBlack
+                            lbl.Text = "[" .. data.RarityName .. "]\n" .. obj.Name
+                            lbl.TextColor3 = data.Color
+                            lbl.TextStrokeTransparency = 0.2
+                            lbl.TextSize = 11
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+-- Anti-AFK
+LocalPlayer.Idled:Connect(function()
+    if Config.AntiAFK then
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end
+end)
