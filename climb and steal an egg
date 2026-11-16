@@ -7,8 +7,8 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
+local GuiService = game:GetService("GuiService")
 local TeleportService = game:GetService("TeleportService")
-local HttpService = game:GetService("HttpService")
 local Lighting = game:GetService("Lighting")
 local Debris = game:GetService("Debris")
 local VirtualUser = game:GetService("VirtualUser")
@@ -16,7 +16,7 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
--- Bersihkan semua GUI versi lama agar tidak bentrok
+-- Bersihkan semua GUI versi sebelumnya
 local ParentGui = (gethui and gethui()) or game:GetService("CoreGui") or LocalPlayer:WaitForChild("PlayerGui")
 for _, oldName in ipairs({
     "ModernEggHub",
@@ -26,7 +26,9 @@ for _, oldName in ipairs({
     "AnimeMasterEggHub",
     "AnimeOverdriveV4_Ultimate",
     "AnimeOverdriveV5_Max",
-    "AnimeOverdriveV6_Pro"
+    "AnimeOverdriveV6_Pro",
+    "AnimeOverdriveV7_RealCarry",
+    "AnimeOverdriveV8_HyperPress"
 }) do
     if ParentGui:FindFirstChild(oldName) then
         ParentGui[oldName]:Destroy()
@@ -129,26 +131,34 @@ local RarityAreas = {
 }
 
 -- ==========================================
--- 2. KONFIGURASI UTAMA (ANTI-PLOT & AUTO COLLECT DIAM)
+-- 2. KONFIGURASI V8 (6-LAYER HYPER-PRESS ENGINE)
 -- ==========================================
 local Config = {
-    -- Mode 1: Auto Collect Diam (Stationary / Karakter Tidak Pindah)
-    StationaryCollect = false,
-    StationaryGhostSync = true,      -- Mengunci kamera di karakter & mengirim paket ambil 1-frame agar masuk inventory
-    StationaryAutoDeposit = true,    -- Otomatis setor ke base saat mode diam aktif
-
-    -- Mode 2: Auto Climb & Steal Egg (Bergerak Cepat & Langsung Balik Base)
+    -- Kontrol Utama Auto Steal
     AutoFarmMove = false,
-    InstantSnapToBase = true,        -- Langsung teleport instan ke Base tanpa ragu-ragu setelah ambil egg
-    InstantSnapToEgg = false,        -- Jika ON, ke telur juga langsung teleport instan (tanpa tween)
-    AutoDepositAfterGrab = true,
+    HyperPressAlwaysOn = false,      -- Otomatis pencet semua tombol/egg di dekat kita walau jalan manual
 
-    -- Filter Anti-Plot Orang Lain (Wajib Aktif)
+    -- 6-Layer Hyper-Press Settings (Penembus Sistem Pencet Game)
+    AutoAimCameraToEgg = true,       -- Layer 1: Arahkan kamera menghadap telur saat mencet (Wajib agar Prompt aktif)
+    StopMovementWhilePressing = true,-- Layer 2: Berhenti diam total saat mencet agar tidak ke-cancel oleh server
+    AutoTapPlayerGuiButtons = true,  -- Layer 3: Pencet tombol UI di layar HP (ProximityPromptUI & Custom GUI)
+    UseSignalAndPromptAPI = true,    -- Layer 4: Gunakan firesignal + fireproximityprompt + Native Hold
+    SmartRemoteFuzzer = true,        -- Layer 5: Tembak RemoteEvent/Function dengan berbagai kombinasi argumen
+    AutoUnequipTools = true,         -- Layer 6: Lepas item di tangan sebelum mencet agar tangan tidak dianggap penuh
+
+    -- Pengaturan Siklus Ambil & Setor Base
+    WaitUntilEggCarried = true,
+    InstantSnapToBase = true,
+    InstantSnapToEgg = false,
+    HoldBufferTime = 0.25,           -- Tambahan waktu tahan di atas HoldDuration asli server (detik)
+    MaxGrabWaitTime = 3.2,
+    DepositStayTime = 0.8,
+
+    -- Filter Anti-Plot Orang Lain
     IgnoreOtherPlayerPlots = true,
-    PlotSafeRadius = 42,             -- Radius terlarang di sekitar plot/base pemain lain
+    PlotSafeRadius = 42,
     SkipRecentlyVisited = true,
     OnlyActiveWildEggs = true,
-    InstantPrompt = true,
     EggCooldownSec = 5,
     CustomKeyword = "egg",
 
@@ -159,16 +169,8 @@ local Config = {
     PrioritizeHighestRarity = true,
     AutoMythicSniper = true,
 
-    -- Kecepatan & Pergerakan
+    -- Kecepatan & Fisika
     GlideSpeed = 95,
-    SegmentedGlide = false,          -- Default OFF agar tidak patah-patah / ragu-ragu
-    SegmentStepDist = 110,
-
-    -- Fitur Ekstra Map
-    RemoveKillBricks = false,
-    AutoCollectPlotCash = false,
-
-    -- Player & Fisika
     SpeedBoost = false,
     WalkSpeed = 75,
     HighJump = false,
@@ -177,13 +179,11 @@ local Config = {
     AirWalkFloat = false,
     Noclip = false,
 
-    -- Visual & ESP
+    -- Visual & Pengaman
     ESP = false,
-    TracerBeam = false,
     Fullbright = false,
     UnlockMaxZoom = false,
-
-    -- Bypass & UI
+    RemoveKillBricks = false,
     VelocityBypass = true,
     FloatPadBypass = true,
     AntiAdmin = true,
@@ -200,19 +200,23 @@ local Config = {
 
 local State = {
     IsGliding = false,
+    IsPressingEgg = false, -- Saat true, karakter dikunci diam agar proses pencet tidak batal!
     CancelGlide = false,
     AdminDetected = false,
     CollectedCount = 0,
     CycleCount = 0,
+    ActivePromptShown = nil,
+    LastTriggerMethod = "Standby",
     AirWalkY = nil,
     MapMinY = 0,
     MapMaxY = 600,
     ZoneCheckpoints = {},
-    PlotCenters = {},       -- Menyimpan daftar semua posisi Plot pemain di server untuk di-blacklist
-    PlotModels = {},        -- Menyimpan Model Plot pemain agar tidak pernah diincar
+    PlotCenters = {},
+    PlotModels = {},
     EggCache = {},
     VisitedEggs = {},
-    EggRemotes = {},        -- Menyimpan RemoteEvent pengambilan telur
+    EggRemotes = {},
+    PromptOrigHold = {},
     OriginalCollide = {},
     DefaultLighting = {
         Brightness = Lighting.Brightness,
@@ -222,11 +226,21 @@ local State = {
     }
 }
 
+-- Tangkap setiap ProximityPrompt yang muncul di layar secara real-time
+ProximityPromptService.PromptShown:Connect(function(prompt)
+    State.ActivePromptShown = prompt
+end)
+ProximityPromptService.PromptHidden:Connect(function(prompt)
+    if State.ActivePromptShown == prompt then
+        State.ActivePromptShown = nil
+    end
+end)
+
 -- ==========================================
--- 3. PEMBUATAN GUI ANIME OVERDRIVE V6
+-- 3. PEMBUATAN GUI ANIME OVERDRIVE V8
 -- ==========================================
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "AnimeOverdriveV6_Pro"
+ScreenGui.Name = "AnimeOverdriveV8_HyperPress"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = ParentGui
@@ -317,7 +331,7 @@ FloatOrb.Size = UDim2.new(0, 58, 0, 58)
 FloatOrb.Position = UDim2.new(0.03, 0, 0.22, 0)
 FloatOrb.BackgroundColor3 = Themes[1].Bg
 FloatOrb.Font = Enum.Font.GothamBlack
-FloatOrb.Text = "ANIME\nV6 PRO"
+FloatOrb.Text = "ANIME\nV8 MAX"
 FloatOrb.TextColor3 = Themes[1].Primary
 FloatOrb.TextSize = 10
 FloatOrb.Visible = false
@@ -332,7 +346,7 @@ makeDraggable(FloatOrb, FloatOrb)
 local MainFrame = Instance.new("Frame", ScreenGui)
 MainFrame.BackgroundColor3 = Themes[1].Bg
 MainFrame.Position = UDim2.new(0.5, -235, 0.5, -180)
-MainFrame.Size = UDim2.new(0, 470, 0, 360)
+MainFrame.Size = UDim2.new(0, 470, 0, 365)
 MainFrame.ClipsDescendants = true
 Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 14)
 
@@ -356,7 +370,6 @@ task.spawn(function()
     end
 end)
 
--- Wallpaper Anime + Dark Shade
 local WallpaperImg = Instance.new("ImageLabel", MainFrame)
 WallpaperImg.Size = UDim2.new(1, 0, 1, 0)
 WallpaperImg.BackgroundTransparency = 1
@@ -372,42 +385,11 @@ DarkShade.BackgroundTransparency = 0.32
 DarkShade.BorderSizePixel = 0
 Instance.new("UICorner", DarkShade).CornerRadius = UDim.new(0, 14)
 
--- Layer Partikel Anime
-local ParticleLayer = Instance.new("Frame", MainFrame)
-ParticleLayer.Size = UDim2.new(1, 0, 1, 0)
-ParticleLayer.BackgroundTransparency = 1
-ParticleLayer.ClipsDescendants = true
-
-task.spawn(function()
-    while MainFrame.Parent do
-        if Config.ParticlesEnabled and MainFrame.Visible then
-            local dot = Instance.new("Frame", ParticleLayer)
-            local sz = math.random(3, 6)
-            dot.Size = UDim2.new(0, sz, 0, sz)
-            dot.Position = UDim2.new(math.random(), 0, 1.05, 0)
-            local th = Themes[Config.ThemeIndex]
-            dot.BackgroundColor3 = (math.random(1, 2) == 1) and th.Primary or th.Secondary
-            dot.BackgroundTransparency = 0.3
-            dot.BorderSizePixel = 0
-            Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
-
-            local moveDur = math.random(28, 52) / 10
-            local tw = TweenService:Create(dot, TweenInfo.new(moveDur, Enum.EasingStyle.Sine), {
-                Position = UDim2.new(math.clamp(dot.Position.X.Scale + (math.random(-15, 15) / 100), 0, 1), 0, -0.1, 0),
-                BackgroundTransparency = 1
-            })
-            tw:Play()
-            Debris:AddItem(dot, moveDur)
-        end
-        task.wait(0.25)
-    end
-end)
-
 -- Header Bar Atas
 local Header = Instance.new("Frame", MainFrame)
 Header.BackgroundColor3 = Themes[1].Card
 Header.BackgroundTransparency = 0.12
-Header.Size = UDim2.new(1, 0, 0, 48)
+Header.Size = UDim2.new(1, 0, 0, 50)
 Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 14)
 makeDraggable(Header, MainFrame)
 
@@ -416,7 +398,7 @@ TitleLabel.BackgroundTransparency = 1
 TitleLabel.Position = UDim2.new(0, 14, 0, 4)
 TitleLabel.Size = UDim2.new(0.82, 0, 0, 20)
 TitleLabel.Font = Enum.Font.GothamBlack
-TitleLabel.Text = "ANIME OVERDRIVE V6 — ANTI-PLOT & AUTO COLLECT DIAM"
+TitleLabel.Text = "ANIME OVERDRIVE V8 — 6-LAYER HYPER-PRESS ENGINE"
 TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
 TitleLabel.TextSize = 11
 TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -426,7 +408,7 @@ LiveStatus.BackgroundTransparency = 1
 LiveStatus.Position = UDim2.new(0, 14, 0, 25)
 LiveStatus.Size = UDim2.new(0.84, 0, 0, 18)
 LiveStatus.Font = Enum.Font.GothamMedium
-LiveStatus.Text = "Status: Siap | Wild Egg: 0 | Terkumpul: 0 | Plot Diblokir: 0"
+LiveStatus.Text = "Status: Siap | Metode Pencet: 6-Layer Aktif | Terkumpul: 0"
 LiveStatus.TextColor3 = Themes[1].Primary
 LiveStatus.TextSize = 10
 LiveStatus.TextXAlignment = Enum.TextXAlignment.Left
@@ -441,15 +423,15 @@ MinBtn.TextColor3 = Color3.fromRGB(15, 15, 20)
 MinBtn.TextSize = 13
 Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0, 7)
 
--- Sidebar 7 Tab (Kiri)
+-- Sidebar 6 Tab (Kiri)
 local Sidebar = Instance.new("ScrollingFrame", MainFrame)
 Sidebar.BackgroundColor3 = Themes[1].Card
 Sidebar.BackgroundTransparency = 0.18
-Sidebar.Position = UDim2.new(0, 8, 0, 55)
-Sidebar.Size = UDim2.new(0, 118, 1, -63)
+Sidebar.Position = UDim2.new(0, 8, 0, 57)
+Sidebar.Size = UDim2.new(0, 118, 1, -65)
 Sidebar.ScrollBarThickness = 2
 Sidebar.BorderSizePixel = 0
-Sidebar.CanvasSize = UDim2.new(0, 0, 0, 280)
+Sidebar.CanvasSize = UDim2.new(0, 0, 0, 250)
 Instance.new("UICorner", Sidebar).CornerRadius = UDim.new(0, 10)
 
 local SideLayout = Instance.new("UIListLayout", Sidebar)
@@ -460,15 +442,15 @@ Instance.new("UIPadding", Sidebar).PaddingTop = UDim.new(0, 6)
 -- Kontainer Halaman Fitur (Kanan)
 local PageHolder = Instance.new("Frame", MainFrame)
 PageHolder.BackgroundTransparency = 1
-PageHolder.Position = UDim2.new(0, 132, 0, 55)
-PageHolder.Size = UDim2.new(1, -140, 1, -63)
+PageHolder.Position = UDim2.new(0, 132, 0, 57)
+PageHolder.Size = UDim2.new(1, -140, 1, -65)
 
 local Pages = {}
 local TabButtons = {}
 
 local function createTab(tabName)
     local Btn = Instance.new("TextButton", Sidebar)
-    Btn.Size = UDim2.new(0.92, 0, 0, 32)
+    Btn.Size = UDim2.new(0.92, 0, 0, 34)
     Btn.BackgroundColor3 = Color3.fromRGB(32, 36, 54)
     Btn.BackgroundTransparency = 0.2
     Btn.Font = Enum.Font.GothamBold
@@ -508,13 +490,12 @@ local function createTab(tabName)
     return Page
 end
 
-local TabStationary = createTab("1. Collect Diam")
-local TabAutoEgg    = createTab("2. Auto Steal")
-local TabRarityArea = createTab("3. Rarity Area")
-local TabBaseTele   = createTab("4. Base & Final")
-local TabPlayer     = createTab("5. Player & Fly")
-local TabVisualESP  = createTab("6. Visual & ESP")
-local TabBypassUI   = createTab("7. Bypass & UI")
+local TabHyperPress = createTab("1. Hyper-Press")
+local TabRarityArea = createTab("2. Rarity Area")
+local TabBaseTele   = createTab("3. Base & Setor")
+local TabPlayer     = createTab("4. Player & Fly")
+local TabVisualESP  = createTab("5. ESP & Debug")
+local TabBypassUI   = createTab("6. Bypass & Tema")
 
 Pages[1].Visible = true
 TabButtons[1].BackgroundColor3 = Themes[1].Primary
@@ -652,7 +633,7 @@ local function addButton(page, btnText, customColor, callback)
 end
 
 -- ==========================================
--- 5. SISTEM DETEKSI & BLACKLIST PLOT ORANG LAIN (ANTI-SALAH INCAR)
+-- 5. ENGINE PENEMBUS SISTEM PENCET GAME (6-LAYER HYPER-PRESS)
 -- ==========================================
 local function getPart(obj)
     if not obj then return nil end
@@ -663,8 +644,172 @@ local function getPart(obj)
     return nil
 end
 
--- Memindai seluruh Plot/Base pemain di server agar telur di plot orang lain di-blacklist
-local function scanAllPlayerPlotsAndBase()
+-- LAYER 3: Menekan semua tombol UI yang muncul di PlayerGui / ProximityPromptUI / BillboardGui (firesignal + Touch/Mouse Tap)
+local function tapAllVisibleInteractButtons()
+    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pGui then return 0 end
+
+    local tappedCount = 0
+    local inset = GuiService:GetGuiInset()
+
+    for _, guiObj in ipairs(pGui:GetDescendants()) do
+        if (guiObj:IsA("TextButton") or guiObj:IsA("ImageButton")) and guiObj.Visible then
+            local bName = string.lower(guiObj.Name)
+            local pName = guiObj.Parent and string.lower(guiObj.Parent.Name) or ""
+            local txt = ""
+            if guiObj:IsA("TextButton") then
+                txt = string.lower(guiObj.Text)
+            else
+                local childTxt = guiObj:FindFirstChildWhichIsA("TextLabel", true)
+                if childTxt then txt = string.lower(childTxt.Text) end
+            end
+
+            local isPromptUI = guiObj:FindFirstAncestor("ProximityPromptUI") ~= nil
+                or bName:find("prompt") or pName:find("prompt")
+                or bName:find("action") or bName:find("interact")
+                or txt:find("steal") or txt:find("grab") or txt:find("take")
+                or txt:find("collect") or txt:find("pick") or txt:find("claim")
+                or txt:find("egg") or txt == "e"
+
+            -- Jangan pencet tombol GUI script kita sendiri
+            if isPromptUI and not guiObj:IsDescendantOf(ScreenGui) then
+                tappedCount = tappedCount + 1
+
+                -- 1. Panggil firesignal & getconnections jika didukung oleh Delta Executor
+                if firesignal then
+                    pcall(function() firesignal(guiObj.Activated) end)
+                    pcall(function() firesignal(guiObj.MouseButton1Down) end)
+                    pcall(function() firesignal(guiObj.MouseButton1Click) end)
+                    pcall(function() firesignal(guiObj.MouseButton1Up) end)
+                    pcall(function() firesignal(guiObj.TouchTap) end)
+                end
+
+                if getconnections then
+                    for _, sig in ipairs({guiObj.Activated, guiObj.MouseButton1Click, guiObj.MouseButton1Down, guiObj.TouchTap}) do
+                        pcall(function()
+                            for _, conn in ipairs(getconnections(sig)) do
+                                if conn.Fire then conn:Fire() end
+                            end
+                        end)
+                    end
+                end
+
+                -- 2. Simulasi Klik Layar Asli tepat di tengah koordinat tombol UI tersebut
+                local absPos = guiObj.AbsolutePosition
+                local absSize = guiObj.AbsoluteSize
+                if absSize.X > 5 and absSize.Y > 5 then
+                    local clickX = absPos.X + (absSize.X / 2)
+                    local clickY = absPos.Y + (absSize.Y / 2) + inset.Y
+                    pcall(function()
+                        VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 1)
+                        task.wait(0.02)
+                        VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 1)
+                    end)
+                end
+            end
+        end
+    end
+
+    return tappedCount
+end
+
+-- LAYER 5: Smart Remote Argument Fuzzer (Menembak Remote pengambilan telur dengan berbagai pola argumen game)
+local function fireSmartEggRemotes(eggObj, part, promptObj)
+    if not Config.SmartRemoteFuzzer then return end
+
+    for _, rem in ipairs(State.EggRemotes) do
+        if rem and rem.Parent then
+            if rem:IsA("RemoteEvent") then
+                pcall(function() rem:FireServer(eggObj) end)
+                pcall(function() rem:FireServer(part) end)
+                pcall(function() rem:FireServer(eggObj.Name) end)
+                pcall(function() rem:FireServer("Steal", eggObj) end)
+                pcall(function() rem:FireServer("Collect", eggObj) end)
+                pcall(function() rem:FireServer("Grab", eggObj) end)
+                if promptObj then
+                    pcall(function() rem:FireServer(promptObj) end)
+                end
+            elseif rem:IsA("RemoteFunction") then
+                task.spawn(function()
+                    pcall(function() rem:InvokeServer(eggObj) end)
+                    pcall(function() rem:InvokeServer("Steal", eggObj) end)
+                end)
+            end
+        end
+    end
+end
+
+-- Cek Jumlah Objek/Telur yang Sedang Dibawa Karakter
+local function countCarriedObjects()
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    local count = 0
+
+    if char then
+        for _, child in ipairs(char:GetChildren()) do
+            if child:IsA("Tool") or child:IsA("Model") then
+                local n = string.lower(child.Name)
+                if n:find("egg") or n:find("pet") or n:find("steal") or n:find("carry") or child:FindFirstChildWhichIsA("BasePart") then
+                    count = count + 1
+                end
+            end
+        end
+        for _, desc in ipairs(char:GetDescendants()) do
+            if desc:IsA("Weld") or desc:IsA("WeldConstraint") or desc:IsA("Motor6D") then
+                local p0, p1 = desc.Part0, desc.Part1
+                if (p0 and not p0:IsDescendantOf(char)) or (p1 and not p1:IsDescendantOf(char)) then
+                    count = count + 2
+                end
+            end
+        end
+        for k, v in pairs(char:GetAttributes()) do
+            local kn = string.lower(k)
+            if (kn:find("carry") or kn:find("egg") or kn:find("holding") or kn:find("stolen")) and v ~= false and v ~= nil and v ~= "" and v ~= 0 then
+                count = count + 2
+            end
+        end
+    end
+
+    for k, v in pairs(LocalPlayer:GetAttributes()) do
+        local kn = string.lower(k)
+        if (kn:find("carry") or kn:find("egg") or kn:find("holding") or kn:find("stolen")) and v ~= false and v ~= nil and v ~= "" and v ~= 0 then
+            count = count + 2
+        end
+    end
+
+    if backpack then
+        count = count + #backpack:GetChildren()
+    end
+
+    return count
+end
+
+local function isEggGrabbedOrGone(eggObj, part, initialCarry)
+    local char = LocalPlayer.Character
+    if not char then return false end
+
+    if countCarriedObjects() > initialCarry then
+        return true
+    end
+    if eggObj and (eggObj:IsDescendantOf(char) or (LocalPlayer:FindFirstChild("Backpack") and eggObj:IsDescendantOf(LocalPlayer.Backpack))) then
+        return true
+    end
+    if not eggObj or not eggObj.Parent or not part or not part.Parent or part.Transparency >= 0.88 then
+        return true
+    end
+
+    local pr = eggObj:FindFirstChildWhichIsA("ProximityPrompt", true) or (eggObj.Parent and eggObj.Parent:FindFirstChildWhichIsA("ProximityPrompt"))
+    if pr and not pr.Enabled then
+        return true
+    end
+
+    return false
+end
+
+-- ==========================================
+-- 6. PEMINDAI PLOT PEMAIN LAIN & WILD EGG
+-- ==========================================
+local function scanAllPlayerPlotsAndRemotes()
     table.clear(State.PlotCenters)
     table.clear(State.PlotModels)
     table.clear(State.EggRemotes)
@@ -677,17 +822,16 @@ local function scanAllPlayerPlotsAndBase()
         playerNames[string.lower(plr.DisplayName)] = plr
     end
 
-    -- Kumpulkan RemoteEvent yang berhubungan dengan Egg
+    -- Scan semua Remote di ReplicatedStorage & Workspace
     for _, rem in ipairs(ReplicatedStorage:GetDescendants()) do
         if rem:IsA("RemoteEvent") or rem:IsA("RemoteFunction") then
             local rn = string.lower(rem.Name)
-            if rn:find("steal") or rn:find("collect") or rn:find("grab") or rn:find("pickup") or rn:find("claim") or rn:find("egg") or rn:find("take") or rn:find("deposit") or rn:find("place") then
+            if rn:find("steal") or rn:find("collect") or rn:find("grab") or rn:find("pickup") or rn:find("claim") or rn:find("egg") or rn:find("take") or rn:find("interact") then
                 table.insert(State.EggRemotes, rem)
             end
         end
     end
 
-    -- Cari semua folder/model Plot atau Base di Workspace
     for _, obj in ipairs(Workspace:GetDescendants()) do
         if obj:IsA("Model") or obj:IsA("Folder") then
             local n = string.lower(obj.Name)
@@ -700,33 +844,29 @@ local function scanAllPlayerPlotsAndBase()
             end
         end
 
-        -- Cek papan nama / Owner Value pada setiap plot
         if obj:IsA("TextLabel") or obj:IsA("StringValue") or obj:IsA("ObjectValue") then
             local val = obj:IsA("TextLabel") and string.lower(obj.Text) or string.lower(tostring(obj.Value))
             if val ~= "" then
                 local plotMdl = obj:FindFirstAncestorOfClass("Model")
                 local plotPart = plotMdl and getPart(plotMdl)
 
-                -- Jika cocok dengan nama kita -> simpan sebagai Base & Deposit kita
                 if val:find(myName, 1, true) or val:find(myDisp, 1, true) then
                     if plotMdl and plotPart then
                         State.PlotModels[plotMdl] = true
                         table.insert(State.PlotCenters, plotPart.Position)
-                        Config.BaseCFrame = plotPart.CFrame + Vector3.new(0, 3.2, 0)
+                        Config.BaseCFrame = plotPart.CFrame + Vector3.new(0, 3.0, 0)
 
-                        -- Cari lingkaran Deposit Pad di dalam plot kita
                         for _, sub in ipairs(plotMdl:GetDescendants()) do
                             if sub:IsA("BasePart") then
                                 local sn = string.lower(sub.Name)
                                 if sn:find("deposit") or sn:find("place") or sn:find("deliver") or sn:find("drop") or sn:find("pad") or sn:find("collect") then
-                                    Config.DepositPadCFrame = sub.CFrame + Vector3.new(0, 2.8, 0)
+                                    Config.DepositPadCFrame = sub.CFrame + Vector3.new(0, 2.5, 0)
                                     break
                                 end
                             end
                         end
                     end
                 else
-                    -- Cek apakah cocok dengan nama pemain lain di server -> masukkan ke Blacklist Plot!
                     for pName, _ in pairs(playerNames) do
                         if #pName >= 3 and val:find(pName, 1, true) then
                             if plotMdl and plotPart then
@@ -744,28 +884,23 @@ local function scanAllPlayerPlotsAndBase()
     if not Config.BaseCFrame then
         local sp = Workspace:FindFirstChildWhichIsA("SpawnLocation", true)
         local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        Config.BaseCFrame = sp and (sp.CFrame + Vector3.new(0, 3.2, 0)) or (root and root.CFrame or CFrame.new(0, 20, 0))
+        Config.BaseCFrame = sp and (sp.CFrame + Vector3.new(0, 3.0, 0)) or (root and root.CFrame or CFrame.new(0, 20, 0))
     end
     if not Config.DepositPadCFrame then
         Config.DepositPadCFrame = Config.BaseCFrame
     end
 end
 
--- Fungsi Ketat untuk Mengecek Apakah Telur Berada di Plot Orang Lain / Sudah Dipajang
 local function isEggInsideAnyPlayerPlot(eggObj, part)
     if not Config.IgnoreOtherPlayerPlots then return false end
 
-    -- 1. Cek hirarki Parent sampai ke Workspace
     local curr = eggObj
     while curr and curr ~= Workspace do
-        if State.PlotModels[curr] then
-            return true
-        end
+        if State.PlotModels[curr] then return true end
         local cn = string.lower(curr.Name)
-        if cn:find("plot") or cn:find("base") or cn:find("placed") or cn:find("owned") or cn:find("incubator") or cn:find("hatch") or cn:find("stand") or cn:find("pedestal_plot") or cn:find("slot") or cn:find("camp") or cn:find("home") then
+        if cn:find("plot") or cn:find("base") or cn:find("placed") or cn:find("owned") or cn:find("incubator") or cn:find("hatch") or cn:find("stand") or cn:find("slot") or cn:find("camp") then
             return true
         end
-        -- Cek apakah nama folder/model sama dengan nama salah satu player di server
         for _, plr in ipairs(Players:GetPlayers()) do
             if cn == string.lower(plr.Name) or cn == string.lower(plr.DisplayName) then
                 return true
@@ -774,7 +909,6 @@ local function isEggInsideAnyPlayerPlot(eggObj, part)
         curr = curr.Parent
     end
 
-    -- 2. Cek Atribut atau Child Value yang menandakan telur sudah dimiliki/ditaruh di plot
     for attrName, attrVal in pairs(eggObj:GetAttributes()) do
         local an = string.lower(attrName)
         if an:find("owner") or an:find("placed") or an:find("plot") or an:find("claimed") or an:find("userid") or an:find("holder") then
@@ -783,33 +917,25 @@ local function isEggInsideAnyPlayerPlot(eggObj, part)
             end
         end
     end
-    for _, child in ipairs(eggObj:GetChildren()) do
-        local chn = string.lower(child.Name)
-        if chn:find("owner") or chn:find("placed") or chn:find("claimed") or chn:find("plot") then
-            return true
-        end
-    end
 
-    -- 3. Cek Teks pada ProximityPrompt atau BillboardGui (Misal bertuliskan "Sell", "Hatch", "Collect Cash", atau nama pemilik)
     for _, d in ipairs(eggObj:GetDescendants()) do
         if d:IsA("ProximityPrompt") then
             local act = string.lower(d.ActionText .. " " .. d.ObjectText)
-            if act:find("sell") or act:find("hatch") or act:find("remove") or act:find("pick up") or act:find("upgrade") or act:find("lock") then
+            if act:find("sell") or act:find("hatch") or act:find("remove") or act:find("upgrade") or act:find("lock") then
                 return true
             end
         elseif d:IsA("TextLabel") then
             local tl = string.lower(d.Text)
-            if tl:find("/s") or tl:find("$/") or tl:find("cash") or tl:find("income") or tl:find("owned by") then
+            if tl:find("/s") or tl:find("$/") or tl:find("income") or tl:find("owned by") then
                 return true
             end
         end
     end
 
-    -- 4. Cek Jarak Radius Spasial terhadap semua titik Plot/Base pemain
     for _, plotPos in ipairs(State.PlotCenters) do
-        local horizontalDist = (Vector2.new(part.Position.X, part.Position.Z) - Vector2.new(plotPos.X, plotPos.Z)).Magnitude
-        local verticalDiff = math.abs(part.Position.Y - plotPos.Y)
-        if horizontalDist <= Config.PlotSafeRadius and verticalDiff <= 35 then
+        local hDist = (Vector2.new(part.Position.X, part.Position.Z) - Vector2.new(plotPos.X, plotPos.Z)).Magnitude
+        local vDiff = math.abs(part.Position.Y - plotPos.Y)
+        if hDist <= Config.PlotSafeRadius and vDiff <= 35 then
             return true
         end
     end
@@ -835,7 +961,11 @@ local function calibrateMapRarityAreas()
     local detectedZones = {}
 
     for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and obj.Name ~= "OverdriveV6SafePad" then
+        if obj:IsA("ProximityPrompt") and State.PromptOrigHold[obj] == nil then
+            State.PromptOrigHold[obj] = obj.HoldDuration
+        end
+
+        if obj:IsA("BasePart") and obj.Name ~= "OverdriveV8SafePad" then
             if obj.Position.Y > -200 and obj.Position.Y < 40000 and obj.Size.Magnitude < 650 then
                 local n = string.lower(obj.Name)
                 local p = obj.Parent and string.lower(obj.Parent.Name) or ""
@@ -846,7 +976,7 @@ local function calibrateMapRarityAreas()
 
                 local areaId = matchAreaIdFromText(obj.Name .. " " .. p)
                 if areaId and not detectedZones[areaId] then
-                    detectedZones[areaId] = obj.CFrame + Vector3.new(0, 4, 0)
+                    detectedZones[areaId] = obj.CFrame + Vector3.new(0, 3.5, 0)
                 end
             end
         end
@@ -876,12 +1006,12 @@ local function calibrateMapRarityAreas()
                 end
             end
             if bestPart then
-                State.ZoneCheckpoints[area.Id] = bestPart.CFrame + Vector3.new(0, 4, 0)
+                State.ZoneCheckpoints[area.Id] = bestPart.CFrame + Vector3.new(0, 3.5, 0)
             end
         end
     end
 
-    scanAllPlayerPlotsAndBase()
+    scanAllPlayerPlotsAndRemotes()
 end
 
 task.spawn(function()
@@ -894,7 +1024,6 @@ local function isWildEggReady(eggObj, part)
         return false
     end
 
-    -- 1. Cek Cooldown Memori
     if Config.SkipRecentlyVisited then
         local exp = State.VisitedEggs[eggObj]
         if exp and tick() < exp then
@@ -902,21 +1031,18 @@ local function isWildEggReady(eggObj, part)
         end
     end
 
-    -- 2. Abaikan telur yang sedang dibawa oleh karakter pemain mana pun
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr.Character and (eggObj:IsDescendantOf(plr.Character) or part:IsDescendantOf(plr.Character)) then
             return false
         end
     end
 
-    -- 3. FILTER UTAMA: Abaikan jika telur berada di dalam Plot pemain lain atau Plot sendiri!
     if isEggInsideAnyPlayerPlot(eggObj, part) then
         return false
     end
 
-    -- 4. Cek apakah telur aktif (tidak transparan & prompt aktif)
     if Config.OnlyActiveWildEggs then
-        if part.Transparency >= 0.92 then
+        if part.Transparency >= 0.9 then
             return false
         end
         local pr = eggObj:FindFirstChildWhichIsA("ProximityPrompt", true) or (eggObj.Parent and eggObj.Parent:FindFirstChildWhichIsA("ProximityPrompt"))
@@ -1014,38 +1140,21 @@ local function refreshEggCache()
     end
 
     LiveStatus.Text = string.format(
-        "Wild Egg: %d | Terkumpul: %d | Plot Diblokir: %d",
-        #State.EggCache, State.CollectedCount, #State.PlotCenters
+        "Wild Egg: %d | Metode: %s | Terkumpul: %d",
+        #State.EggCache, State.LastTriggerMethod, State.CollectedCount
     )
 end
 
 -- ==========================================
--- 6. ENGINE PERGERAKAN TANPA RAGU & STATIONARY COLLECT
+-- 7. EKSEKUSI 6-LAYER HYPER-PRESS & STOP-AND-HOLD
 -- ==========================================
 local SafePad = Instance.new("Part")
-SafePad.Name = "OverdriveV6SafePad"
-SafePad.Size = Vector3.new(7, 1, 7)
+SafePad.Name = "OverdriveV8SafePad"
+SafePad.Size = Vector3.new(8, 1, 8)
 SafePad.Transparency = 1
 SafePad.Anchored = true
 SafePad.CanCollide = true
 SafePad.Parent = Workspace
-
-local BeamPart = Instance.new("Part", Workspace)
-BeamPart.Name = "OverdriveV6Tracer"
-BeamPart.Anchored = true
-BeamPart.CanCollide = false
-BeamPart.Transparency = 1
-BeamPart.Size = Vector3.new(0.2, 0.2, 0.2)
-
-local AttachPlayer = Instance.new("Attachment", BeamPart)
-local AttachTarget = Instance.new("Attachment", BeamPart)
-local TargetBeam = Instance.new("Beam", BeamPart)
-TargetBeam.Attachment0 = AttachPlayer
-TargetBeam.Attachment1 = AttachTarget
-TargetBeam.Width0 = 0.25
-TargetBeam.Width1 = 0.25
-TargetBeam.FaceCamera = true
-TargetBeam.Enabled = false
 
 local function setNoclipMode(enabled)
     local char = LocalPlayer.Character
@@ -1067,7 +1176,6 @@ local function setNoclipMode(enabled)
     end
 end
 
--- Fungsi Pindah Cepat / Instant Snap (Tanpa Ragu-ragu)
 local function moveCharacterTo(targetCF, forceInstantSnap)
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -1081,7 +1189,6 @@ local function moveCharacterTo(targetCF, forceInstantSnap)
         LocalPlayer:RequestStreamAroundAsync(targetCF.Position, 2)
     end)
 
-    -- Jika Instant Snap aktif (misal saat balik ke Base), langsung teleport dalam 1 frame tanpa tween!
     if forceInstantSnap or Config.InstantSnapToEgg then
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
@@ -1093,7 +1200,7 @@ local function moveCharacterTo(targetCF, forceInstantSnap)
     State.CancelGlide = false
 
     local dist = (root.Position - targetCF.Position).Magnitude
-    local duration = math.clamp(dist / math.max(30, Config.GlideSpeed), 0.05, 1.4)
+    local duration = math.clamp(dist / math.max(30, Config.GlideSpeed), 0.05, 1.35)
 
     local tw = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
         CFrame = targetCF
@@ -1118,61 +1225,8 @@ local function moveCharacterTo(targetCF, forceInstantSnap)
     return true
 end
 
--- Pemicu Interaksi Telur (Prompt + Touch + Remote)
-local function fireAllEggTriggers(eggObj, part, root)
-    -- 1. Trigger Semua ProximityPrompt dengan Jarak Tak Terbatas
-    local prompts = {}
-    for _, d in ipairs(eggObj:GetDescendants()) do
-        if d:IsA("ProximityPrompt") then table.insert(prompts, d) end
-    end
-    if eggObj.Parent then
-        for _, d in ipairs(eggObj.Parent:GetChildren()) do
-            if d:IsA("ProximityPrompt") then table.insert(prompts, d) end
-        end
-    end
-
-    for _, pr in ipairs(prompts) do
-        pr.HoldDuration = 0
-        pr.MaxActivationDistance = 99999
-        pr.RequiresLineOfSight = false
-        if fireproximityprompt then
-            pcall(function() fireproximityprompt(pr) end)
-        end
-        pcall(function()
-            pr:InputHoldBegin()
-            pr:InputHoldEnd()
-        end)
-    end
-
-    -- 2. Trigger TouchInterest
-    if firetouchinterest and root and part then
-        pcall(function()
-            firetouchinterest(root, part, 0)
-            firetouchinterest(root, part, 1)
-        end)
-    end
-
-    -- 3. Trigger ClickDetector
-    for _, cd in ipairs(eggObj:GetDescendants()) do
-        if cd:IsA("ClickDetector") then
-            cd.MaxActivationDistance = 99999
-            if fireclickdetector then
-                pcall(function() fireclickdetector(cd) end)
-            end
-        end
-    end
-
-    -- 4. Tembakkan RemoteEvent Pengambilan Egg
-    for _, rem in ipairs(State.EggRemotes) do
-        if rem:IsA("RemoteEvent") then
-            pcall(function() rem:FireServer(eggObj) end)
-            pcall(function() rem:FireServer(eggObj.Name) end)
-        end
-    end
-end
-
--- FITUR BARU: Auto Collect Egg Saat Karakter Diam (Stationary Collect)
-local function collectEggWhileStandingStill(eggItem)
+-- INTI UTAMA V8: 6-Layer Hyper-Press yang Menembus Proteksi Pencet Game
+local function executeHyperPressGrab(eggItem)
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -1180,208 +1234,319 @@ local function collectEggWhileStandingStill(eggItem)
 
     local eggObj = eggItem.Object
     local part = eggItem.Part
-    if not eggObj or not part then return false end
+    if not eggObj or not part or not part.Parent then return false end
 
-    State.VisitedEggs[eggObj] = tick() + Config.EggCooldownSec
-    local savedStandCFrame = root.CFrame
-    local savedEggCFrame = part.CFrame
-    local savedCamType = Camera.CameraType
-    local savedCamCF = Camera.CFrame
+    -- LAYER 6: Lepas tool yang sedang dipegang agar tangan kosong & siap membawa telur
+    if Config.AutoUnequipTools then
+        pcall(function() hum:UnequipTools() end)
+    end
 
-    -- Langkah 1: Tarik hitbox telur ke posisi karakter secara tak terlihat + Fire Remote & Prompt
+    local initialCarry = countCarriedObjects()
+
+    -- Kumpulkan semua ProximityPrompt di telur, parent, maupun radius 12 studs dari telur
+    local prompts = {}
+    local seenPrompt = {}
+    for _, d in ipairs(eggObj:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and not seenPrompt[d] then
+            seenPrompt[d] = true
+            table.insert(prompts, d)
+        end
+    end
+    if eggObj.Parent then
+        for _, d in ipairs(eggObj.Parent:GetDescendants()) do
+            if d:IsA("ProximityPrompt") and not seenPrompt[d] then
+                seenPrompt[d] = true
+                table.insert(prompts, d)
+            end
+        end
+    end
+    for _, d in ipairs(Workspace:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and not seenPrompt[d] then
+            local parentPart = d:FindFirstAncestorWhichIsA("BasePart") or (d:FindFirstAncestorOfClass("Model") and getPart(d:FindFirstAncestorOfClass("Model")))
+            if parentPart and (parentPart.Position - part.Position).Magnitude <= 10 then
+                seenPrompt[d] = true
+                table.insert(prompts, d)
+            end
+        end
+    end
+
+    -- Baca durasi Hold asli server & buka kunci batas jarak/pandangan prompt
+    local serverHold = 0
+    for _, pr in ipairs(prompts) do
+        if State.PromptOrigHold[pr] == nil then
+            State.PromptOrigHold[pr] = pr.HoldDuration
+        end
+        if State.PromptOrigHold[pr] > serverHold then
+            serverHold = State.PromptOrigHold[pr]
+        end
+        pr.RequiresLineOfSight = false
+        pr.MaxActivationDistance = math.max(pr.MaxActivationDistance, 32)
+    end
+
+    -- LAYER 2: Berhenti Tepat di Samping Telur & Kunci Diam Sempurna (Jangan Di-Spam CFrame Lagi!)
+    setNoclipMode(false)
+    State.IsPressingEgg = true
+
+    local standPos = part.Position + Vector3.new(0, 1.5, 2.2)
+    local lookAtEggCF = CFrame.lookAt(standPos, part.Position)
+    SafePad.CFrame = CFrame.new(standPos.X, standPos.Y - 3.3, standPos.Z)
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    root.CFrame = lookAtEggCF
+
+    -- LAYER 1: Arahkan Kamera Menghadap Tepat ke Telur agar Roblox Memunculkan Tombol Prompt di Layar!
+    if Config.AutoAimCameraToEgg then
+        local camPos = standPos + Vector3.new(0, 3.5, 6)
+        Camera.CFrame = CFrame.lookAt(camPos, part.Position)
+    end
+
+    -- Beri 2 frame agar mesin Roblox memicu event PromptShown secara resmi
+    RunService.Heartbeat:Wait()
+    RunService.Heartbeat:Wait()
+
+    if State.ActivePromptShown and not seenPrompt[State.ActivePromptShown] then
+        table.insert(prompts, State.ActivePromptShown)
+    end
+
+    -- Mulai Menahan Semua Prompt & Tombol E
+    for _, pr in ipairs(prompts) do
+        pcall(function() pr:InputHoldBegin() end)
+    end
     pcall(function()
-        part.CanCollide = false
-        part.CFrame = savedStandCFrame
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
     end)
-    fireAllEggTriggers(eggObj, part, root)
 
-    -- Langkah 2: Jika Ghost Sync aktif (untuk server yang mengecek jarak karakter di sisi server),
-    -- kunci kamera agar layar dan karakter terlihat tetap diam di tempat, lalu kirim paket posisi 1-frame
-    if Config.StationaryGhostSync then
-        Camera.CameraType = Enum.CameraType.Scriptable
-        Camera.CFrame = savedCamCF
+    -- Sentuh fisik telur sekali di awal
+    if firetouchinterest then
+        pcall(function()
+            firetouchinterest(root, part, 0)
+            firetouchinterest(root, part, 1)
+        end)
+    end
+
+    local startHold = tick()
+    local requiredWait = serverHold + Config.HoldBufferTime
+    local maxTimeout = math.max(Config.MaxGrabWaitTime, requiredWait + 0.8)
+    local grabConfirmed = false
+
+    while (tick() - startHold) < maxTimeout do
+        if not root.Parent or hum.Health <= 0 then break end
+        if not part or not part.Parent then
+            grabConfirmed = true
+            break
+        end
+
+        local elapsed = tick() - startHold
+        LiveStatus.Text = string.format(
+            "Hyper-Press [%s]: Menahan %.1fs / %.1fs...",
+            eggObj.Name, elapsed, requiredWait
+        )
+
+        -- Pertahankan arah kamera ke telur tanpa mengubah CFrame karakter (agar tidak dianggap bergerak oleh server!)
+        root.AssemblyLinearVelocity = Vector3.zero
+        if Config.AutoAimCameraToEgg then
+            local camPos = root.Position + Vector3.new(0, 3.5, 6)
+            Camera.CFrame = CFrame.lookAt(camPos, part.Position)
+        end
+
+        -- LAYER 3: Pencet tombol UI di layar HP (PlayerGui / ProximityPromptUI)
+        if Config.AutoTapPlayerGuiButtons then
+            local tapped = tapAllVisibleInteractButtons()
+            if tapped > 0 then
+                State.LastTriggerMethod = "UI Tap + Hold"
+            end
+        end
+
+        -- LAYER 4: ClickDetector & fireproximityprompt setelah durasi server terpenuhi
+        for _, cd in ipairs(eggObj:GetDescendants()) do
+            if cd:IsA("ClickDetector") and fireclickdetector then
+                pcall(function() fireclickdetector(cd) end)
+            end
+        end
+
+        if elapsed >= serverHold and Config.UseSignalAndPromptAPI then
+            for _, pr in ipairs(prompts) do
+                if fireproximityprompt then
+                    pcall(function() fireproximityprompt(pr) end)
+                end
+                if firesignal then
+                    pcall(function() firesignal(pr.Triggered, LocalPlayer) end)
+                end
+            end
+            State.LastTriggerMethod = "Prompt + Signal"
+        end
+
+        -- LAYER 5: Smart Remote Argument Fuzzer
+        if elapsed >= (serverHold * 0.5) then
+            fireSmartEggRemotes(eggObj, part, prompts[1])
+        end
+
+        -- Cek apakah telur sudah benar-benar menempel di karakter / masuk inventory!
+        if isEggGrabbedOrGone(eggObj, part, initialCarry) then
+            grabConfirmed = true
+            State.LastTriggerMethod = "6-Layer Verified!"
+            break
+        end
+
+        task.wait(0.08)
+    end
+
+    -- Selesai menahan -> lepaskan InputHoldEnd & Tombol E
+    for _, pr in ipairs(prompts) do
+        pcall(function() pr:InputHoldEnd() end)
+        if fireproximityprompt then
+            pcall(function() fireproximityprompt(pr) end)
+        end
+    end
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+    end)
+
+    State.IsPressingEgg = false
+    State.VisitedEggs[eggObj] = tick() + Config.EggCooldownSec
+    return grabConfirmed
+end
+
+-- Fungsi Setor Telur ke Deposit Pad Base dengan 6-Layer Press juga!
+local function depositCarriedEggToBase()
+    local targetDeposit = Config.DepositPadCFrame or Config.BaseCFrame
+    if not targetDeposit then return end
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum or hum.Health <= 0 then return end
+
+    LiveStatus.Text = "Teleport ke Base & Menyetor Telur (Hyper-Deposit)..."
+    moveCharacterTo(targetDeposit + Vector3.new(0, 1.8, 0), Config.InstantSnapToBase)
+    setNoclipMode(false)
+
+    local beforeCarry = countCarriedObjects()
+    local startDep = tick()
+
+    while (tick() - startDep) < Config.DepositStayTime do
+        if not root.Parent or hum.Health <= 0 then break end
 
         root.AssemblyLinearVelocity = Vector3.zero
-        root.CFrame = savedEggCFrame + Vector3.new(0, 1.8, 0)
-        RunService.Heartbeat:Wait()
-        fireAllEggTriggers(eggObj, part, root)
+        if Config.AutoAimCameraToEgg then
+            Camera.CFrame = CFrame.lookAt(root.Position + Vector3.new(0, 5, 6), targetDeposit.Position)
+        end
 
-        -- Jika Auto Deposit aktif, langsung kirim sentuhan 1-frame ke Deposit Pad Base sebelum kembali ke titik diam
-        if Config.StationaryAutoDeposit and Config.DepositPadCFrame then
-            root.CFrame = Config.DepositPadCFrame
-            RunService.Heartbeat:Wait()
-            for _, obj in ipairs(Workspace:GetDescendants()) do
-                if obj:IsA("BasePart") and (obj.Position - Config.DepositPadCFrame.Position).Magnitude < 16 then
+        -- Pencet tombol UI Setor/Place jika muncul di layar HP
+        if Config.AutoTapPlayerGuiButtons then
+            tapAllVisibleInteractButtons()
+        end
+
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if obj:IsA("BasePart") and (obj.Position - targetDeposit.Position).Magnitude < 18 then
+                local n = string.lower(obj.Name)
+                if n:find("deposit") or n:find("place") or n:find("deliver") or n:find("drop") or n:find("pad") or n:find("collect") or n:find("base") or n:find("stand") then
                     if firetouchinterest then
                         pcall(function()
                             firetouchinterest(root, obj, 0)
                             firetouchinterest(root, obj, 1)
                         end)
                     end
-                    local pr = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
-                    if pr and fireproximityprompt then
-                        pr.HoldDuration = 0
-                        pcall(function() fireproximityprompt(pr) end)
-                    end
                 end
-            end
-        end
-
-        -- Kembalikan karakter ke posisi berdiri semula dalam frame yang sama
-        root.CFrame = savedStandCFrame
-        root.AssemblyLinearVelocity = Vector3.zero
-        Camera.CameraType = savedCamType
-    end
-
-    pcall(function()
-        if part and part.Parent then
-            part.CFrame = savedEggCFrame
-        end
-    end)
-
-    State.CollectedCount = State.CollectedCount + 1
-    return true
-end
-
--- Fungsi Setor ke Base Langsung Tanpa Ragu-ragu (Instant Snap Deposit)
-local function instantReturnAndDepositToBase()
-    local targetDeposit = Config.DepositPadCFrame or Config.BaseCFrame
-    if not targetDeposit then return end
-
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-
-    LiveStatus.Text = "Instant Teleport ke Base & Setor Egg..."
-
-    -- Langsung pindah ke Base (Instant Snap jika diaktifkan)
-    moveCharacterTo(targetDeposit + Vector3.new(0, 1.8, 0), Config.InstantSnapToBase)
-
-    -- Sentuh & picu pad deposit secara instan
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and (obj.Position - targetDeposit.Position).Magnitude < 18 then
-            local n = string.lower(obj.Name)
-            if n:find("deposit") or n:find("place") or n:find("deliver") or n:find("drop") or n:find("pad") or n:find("collect") or n:find("base") then
-                if firetouchinterest then
+                local pr = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+                if pr and pr.Enabled then
+                    pr.RequiresLineOfSight = false
+                    if fireproximityprompt then pcall(function() fireproximityprompt(pr) end) end
                     pcall(function()
-                        firetouchinterest(root, obj, 0)
-                        firetouchinterest(root, obj, 1)
+                        pr:InputHoldBegin()
+                        task.wait(0.04)
+                        pr:InputHoldEnd()
                     end)
                 end
             end
-            local pr = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if pr then
-                pr.HoldDuration = 0
-                if fireproximityprompt then pcall(function() fireproximityprompt(pr) end) end
-                pcall(function()
-                    pr:InputHoldBegin()
-                    pr:InputHoldEnd()
-                end)
-            end
         end
+
+        if countCarriedObjects() < beforeCarry then
+            break
+        end
+
+        task.wait(0.08)
     end
 
-    pcall(function()
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-        task.wait(0.02)
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-    end)
-
-    task.wait(0.12)
+    State.CollectedCount = State.CollectedCount + 1
 end
 
 -- ==========================================
--- 7. PENGISIAN FITUR DI 7 TAB MENU
+-- 8. PENGISIAN FITUR DI 6 TAB MENU
 -- ==========================================
--- [TAB 1: AUTO COLLECT DIAM (STATIONARY)]
-addSectionHeader(TabStationary, "Auto Collect Egg (Karakter Tetap Diam)")
+-- [TAB 1: 6-LAYER HYPER-PRESS ENGINE]
+addSectionHeader(TabHyperPress, "Sistem Pencet Tembus Game (6-Layer V8)")
 
-addToggle(TabStationary, "Auto Collect Egg (Karakter Diam di Tempat)", Config.StationaryCollect, function(val)
-    Config.StationaryCollect = val
+addToggle(TabHyperPress, "Auto Steal + 6-Layer Hyper-Press (Utama)", Config.AutoFarmMove, function(val)
+    Config.AutoFarmMove = val
     if val then
-        Config.AutoFarmMove = false
         table.clear(State.VisitedEggs)
-        scanAllPlayerPlotsAndBase()
-        sendNotification("Stationary Collect ON", "Karakter tetap diam, telur otomatis diambil!", 3)
+        scanAllPlayerPlotsAndRemotes()
+        sendNotification("Hyper-Press V8 ON", "Kamera AimLock + Stop-Hold + UI Tap aktif!", 3)
     else
-        sendNotification("Stationary Collect OFF", "Mode Auto Collect Diam dimatikan.", 2)
+        State.CancelGlide = true
+        State.IsPressingEgg = false
+        if not Config.Noclip then setNoclipMode(false) end
     end
 end)
 
-addToggle(TabStationary, "Ghost Packet Sync (Bypass Jarak Server)", Config.StationaryGhostSync, function(val)
-    Config.StationaryGhostSync = val
+addToggle(TabHyperPress, "Auto Pencet Saat Jalan Manual (Aura Grab)", Config.HyperPressAlwaysOn, function(val)
+    Config.HyperPressAlwaysOn = val
+    if val then
+        sendNotification("Aura Grab Aktif", "Dekati telur secara manual, otomatis terpencet!", 2.5)
+    end
 end)
 
-addToggle(TabStationary, "Auto Setor ke Base Saat Mode Diam", Config.StationaryAutoDeposit, function(val)
-    Config.StationaryAutoDeposit = val
+addToggle(TabHyperPress, "Layer 1: Auto Arahkan Kamera ke Telur", Config.AutoAimCameraToEgg, function(val)
+    Config.AutoAimCameraToEgg = val
 end)
 
-addButton(TabStationary, "Ambil 1 Telur Terbaik Sekarang (Tanpa Pindah)", Themes[1].Primary, function()
+addToggle(TabHyperPress, "Layer 2: Kunci Diam Saat Mencet (Anti-Batal)", Config.StopMovementWhilePressing, function(val)
+    Config.StopMovementWhilePressing = val
+end)
+
+addToggle(TabHyperPress, "Layer 3: Auto-Tap Tombol UI Layar HP", Config.AutoTapPlayerGuiButtons, function(val)
+    Config.AutoTapPlayerGuiButtons = val
+end)
+
+addToggle(TabHyperPress, "Layer 5: Smart Remote Argument Fuzzer", Config.SmartRemoteFuzzer, function(val)
+    Config.SmartRemoteFuzzer = val
+end)
+
+addButton(TabHyperPress, "TES PENCET PAKSA TELUR TERDEKAT SEKARANG", Themes[1].Primary, function()
     task.spawn(function()
         refreshEggCache()
-        local best = nil
+        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+
+        local nearest, minDist = nil, math.huge
         for _, item in ipairs(State.EggCache) do
-            if item.Part and (not best or item.RarityId > best.RarityId) then
-                best = item
+            if item.Part then
+                local d = (root.Position - item.Part.Position).Magnitude
+                if d < minDist then
+                    minDist = d
+                    nearest = item
+                end
             end
         end
-        if best then
-            collectEggWhileStandingStill(best)
-            sendNotification("Remote Grab Sukses", "Mengambil [" .. best.Tag .. "] " .. best.Object.Name, 2.5)
+
+        if nearest then
+            sendNotification("Tes Hyper-Press", "Mencoba mencet [" .. nearest.Object.Name .. "]...", 2.5)
+            moveCharacterTo(nearest.Part.CFrame + Vector3.new(0, 1.5, 2.2), false)
+            local ok = executeHyperPressGrab(nearest)
+            if ok then
+                sendNotification("BERHASIL!", "Telur berhasil terambil & terbawa!", 3)
+                depositCarriedEggToBase()
+            else
+                sendNotification("Info", "Sinyal pencet dikirim ke telur terdekat.", 2)
+            end
         else
-            sendNotification("Info", "Belum ada telur liar yang terdeteksi.", 2)
+            sendNotification("Info", "Tidak ada telur liar yang terdeteksi.", 2)
         end
     end)
 end)
 
--- [TAB 2: AUTO STEAL & FILTER ANTI-PLOT ORANG]
-addSectionHeader(TabAutoEgg, "Auto Steal Cepat & Langsung Balik Base")
-
-addToggle(TabAutoEgg, "Auto Steal Egg + Langsung Balik Base", Config.AutoFarmMove, function(val)
-    Config.AutoFarmMove = val
-    if val then
-        Config.StationaryCollect = false
-        table.clear(State.VisitedEggs)
-        scanAllPlayerPlotsAndBase()
-    else
-        State.CancelGlide = true
-        TargetBeam.Enabled = false
-        if not Config.Noclip then setNoclipMode(false) end
-    end
-    sendNotification("Auto Steal Egg", val and "Auto Steal Cepat Aktif!" or "Auto Steal Dimatikan.", 2.5)
-end)
-
-addToggle(TabAutoEgg, "Instant Teleport ke Base (Tanpa Ragu-ragu)", Config.InstantSnapToBase, function(val)
-    Config.InstantSnapToBase = val
-end)
-
-addToggle(TabAutoEgg, "Instant Teleport Saat Menuju ke Egg", Config.InstantSnapToEgg, function(val)
-    Config.InstantSnapToEgg = val
-end)
-
-addSectionHeader(TabAutoEgg, "Proteksi Anti-Plot Orang Lain")
-
-addToggle(TabAutoEgg, "Blokir Semua Plot Pemain Lain (Anti-Nyasar)", Config.IgnoreOtherPlayerPlots, function(val)
-    Config.IgnoreOtherPlayerPlots = val
-    refreshEggCache()
-end)
-
-addSlider(TabAutoEgg, "Radius Aman Blokir Plot (Studs)", 20, 90, Config.PlotSafeRadius, function(val)
-    Config.PlotSafeRadius = val
-end)
-
-addSlider(TabAutoEgg, "Kecepatan Terbang ke Egg (Glide Speed)", 40, 220, Config.GlideSpeed, function(val)
-    Config.GlideSpeed = val
-end)
-
-addButton(TabAutoEgg, "Scan Ulang Plot Pemain & Reset Memori Egg", Color3.fromRGB(0, 175, 230), function()
-    table.clear(State.VisitedEggs)
-    scanAllPlayerPlotsAndBase()
-    refreshEggCache()
-    sendNotification("Plot Diperbarui", "Total Plot Diblokir: " .. tostring(#State.PlotCenters), 2.5)
-end)
-
--- [TAB 3: RARITY AREA (6 ZONA MAP ASLI)]
+-- [TAB 2: RARITY AREA (6 ZONA MAP ASLI)]
 addSectionHeader(TabRarityArea, "Pilih Rarity Area Sesuai Map Asli")
 
 local AreaSelectBtn
@@ -1413,37 +1578,33 @@ addToggle(TabRarityArea, "Auto Sniper Mythic/Secret (Prioritas #1)", Config.Auto
     Config.AutoMythicSniper = val
 end)
 
-addSectionHeader(TabRarityArea, "Teleport Langsung ke Rarity Area")
-
 for i = 2, #RarityAreas do
     local zone = RarityAreas[i]
-    local zBtn = addButton(TabRarityArea, "Ke " .. zone.Name, zone.Color, function()
+    local zBtn = addButton(TabRarityArea, "Teleport ke " .. zone.Name, zone.Color, function()
         task.spawn(function()
             calibrateMapRarityAreas()
             local cf = State.ZoneCheckpoints[zone.Id]
-            if cf then
-                moveCharacterTo(cf, false)
-            end
+            if cf then moveCharacterTo(cf, false) end
         end)
     end)
     zBtn.TextColor3 = Color3.fromRGB(15, 15, 20)
 end
 
--- [TAB 4: BASE, TITIK DEPOSIT & FINAL]
-addSectionHeader(TabBaseTele, "Pengaturan Titik Setor (Deposit) & Base")
+-- [TAB 3: BASE & TITIK DEPOSIT]
+addSectionHeader(TabBaseTele, "Pengaturan Titik Setor (Deposit Pad) Base")
 
 addButton(TabBaseTele, "Simpan Posisi Berdiri Sebagai TITIK DEPOSIT BASE", Color3.fromRGB(0, 210, 130), function()
     local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
     if root then
         Config.DepositPadCFrame = root.CFrame
         Config.BaseCFrame = root.CFrame
-        sendNotification("Titik Deposit Disimpan!", "Karakter akan langsung teleport ke titik ini.", 3)
+        sendNotification("Titik Deposit Disimpan!", "Telur yang dibawa akan langsung disetor ke titik ini.", 3)
     end
 end)
 
-addButton(TabBaseTele, "Teleport Instan ke Base Sekarang", Color3.fromRGB(0, 185, 235), function()
+addButton(TabBaseTele, "Setor Telur ke Base Sekarang", Color3.fromRGB(0, 185, 235), function()
     task.spawn(function()
-        instantReturnAndDepositToBase()
+        depositCarriedEggToBase()
     end)
 end)
 
@@ -1451,24 +1612,21 @@ addButton(TabBaseTele, "Naik ke LEVEL FINAL (Puncak Tertinggi)", Color3.fromRGB(
     task.spawn(function()
         calibrateMapRarityAreas()
         local finalCF = State.ZoneCheckpoints[5]
-        if finalCF then
-            moveCharacterTo(finalCF, false)
-        end
+        if finalCF then moveCharacterTo(finalCF, false) end
     end)
 end)
 
-addSectionHeader(TabBaseTele, "Fitur Bantuan Map")
-
-addToggle(TabBaseTele, "Auto Hapus Laser / KillBricks", Config.RemoveKillBricks, function(val)
-    Config.RemoveKillBricks = val
+addToggle(TabBaseTele, "Blokir Semua Plot Pemain Lain (Anti-Nyasar)", Config.IgnoreOtherPlayerPlots, function(val)
+    Config.IgnoreOtherPlayerPlots = val
+    refreshEggCache()
 end)
 
-addToggle(TabBaseTele, "Auto Collect Cash di Plot Sendiri", Config.AutoCollectPlotCash, function(val)
-    Config.AutoCollectPlotCash = val
-end)
-
--- [TAB 5: PLAYER & FLY]
+-- [TAB 4: PLAYER & FLY]
 addSectionHeader(TabPlayer, "Kecepatan, Lompatan & Berjalan di Udara")
+
+addSlider(TabPlayer, "Kecepatan Terbang ke Egg (Glide Speed)", 40, 220, Config.GlideSpeed, function(val)
+    Config.GlideSpeed = val
+end)
 
 addToggle(TabPlayer, "Aktifkan Speed Boost (Lari Cepat)", Config.SpeedBoost, function(val)
     Config.SpeedBoost = val
@@ -1490,10 +1648,6 @@ addToggle(TabPlayer, "Aktifkan High Jump (Lompat Tinggi)", Config.HighJump, func
     end
 end)
 
-addSlider(TabPlayer, "Atur JumpPower", 50, 280, Config.JumpPower, function(val)
-    Config.JumpPower = val
-end)
-
 addToggle(TabPlayer, "Infinite Jump (Lompat Udara)", Config.InfJump, function(val)
     Config.InfJump = val
 end)
@@ -1509,21 +1663,29 @@ addToggle(TabPlayer, "Noclip Manual (Tembus Tembok)", Config.Noclip, function(va
     setNoclipMode(val)
 end)
 
--- [TAB 6: VISUAL & ESP]
-addSectionHeader(TabVisualESP, "ESP Wild Egg (Tanpa Egg Plot Orang)")
+-- [TAB 5: ESP & DEBUG INSPECTOR]
+addSectionHeader(TabVisualESP, "ESP Wild Egg & Inspector Tombol")
 
 addToggle(TabVisualESP, "ESP Highlight + Label Rarity Area", Config.ESP, function(val)
     Config.ESP = val
     if not val then
         for _, v in ipairs(Workspace:GetDescendants()) do
-            if v.Name == "V6EggESP" or v.Name == "V6EggTag" then v:Destroy() end
+            if v.Name == "V8EggESP" or v.Name == "V8EggTag" then v:Destroy() end
         end
     end
 end)
 
-addToggle(TabVisualESP, "Garis Tracer Beam ke Target Egg", Config.TracerBeam, function(val)
-    Config.TracerBeam = val
-    if not val then TargetBeam.Enabled = false end
+addButton(TabVisualESP, "Cek Jumlah Remote & Prompt di Map (Diagnosa)", Color3.fromRGB(90, 120, 220), function()
+    scanAllPlayerPlotsAndRemotes()
+    local promptCount = 0
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        if v:IsA("ProximityPrompt") then promptCount = promptCount + 1 end
+    end
+    sendNotification(
+        "Hasil Diagnosa Map",
+        string.format("Prompt: %d | Remote Egg: %d | Plot Diblokir: %d", promptCount, #State.EggRemotes, #State.PlotCenters),
+        4
+    )
 end)
 
 addToggle(TabVisualESP, "Fullbright (Terang Tanpa Kabut)", Config.Fullbright, function(val)
@@ -1541,13 +1703,8 @@ addToggle(TabVisualESP, "Fullbright (Terang Tanpa Kabut)", Config.Fullbright, fu
     end
 end)
 
-addToggle(TabVisualESP, "Unlock Max Camera Zoom", Config.UnlockMaxZoom, function(val)
-    Config.UnlockMaxZoom = val
-    LocalPlayer.CameraMaxZoomDistance = val and 2500 or 128
-end)
-
--- [TAB 7: BYPASS, SERVER & TEMA ANIME]
-addSectionHeader(TabBypassUI, "Pengaman & Tema Anime")
+-- [TAB 6: BYPASS & TEMA ANIME]
+addSectionHeader(TabBypassUI, "Pengaman & Kustomisasi Tema")
 
 addToggle(TabBypassUI, "Velocity Zero Stabilizer (Anti-Tarik Server)", Config.VelocityBypass, function(val)
     Config.VelocityBypass = val
@@ -1559,10 +1716,6 @@ end)
 
 addToggle(TabBypassUI, "Anti-Void (Penyelamat Jatuh)", Config.AntiVoid, function(val)
     Config.AntiVoid = val
-end)
-
-addButton(TabBypassUI, "Rejoin Server Saat Ini", Color3.fromRGB(70, 110, 210), function()
-    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
 end)
 
 addButton(TabBypassUI, "Ganti Tema: " .. Themes[1].Name, nil, function(btn)
@@ -1595,10 +1748,11 @@ FloatOrb.MouseButton1Click:Connect(function()
 end)
 
 -- ==========================================
--- 8. RUNTIME LOOPS (STATIONARY COLLECT & FAST AUTO STEAL)
+-- 9. RUNTIME LOOPS (6-LAYER HYPER-PRESS & AURA GRAB)
 -- ==========================================
 LocalPlayer.CharacterAdded:Connect(function()
     State.IsGliding = false
+    State.IsPressingEgg = false
     State.CancelGlide = false
     table.clear(State.OriginalCollide)
 end)
@@ -1609,14 +1763,14 @@ RunService.Heartbeat:Connect(function()
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not root or not hum then return end
 
-    if (State.IsGliding or Config.AutoFarmMove) and Config.VelocityBypass then
+    if (State.IsGliding or State.IsPressingEgg or Config.AutoFarmMove) and Config.VelocityBypass then
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
     end
 
     if Config.AirWalkFloat and State.AirWalkY then
         SafePad.CFrame = CFrame.new(root.Position.X, State.AirWalkY, root.Position.Z)
-    elseif (State.IsGliding or Config.AutoFarmMove) and Config.FloatPadBypass then
+    elseif (State.IsGliding or State.IsPressingEgg or Config.AutoFarmMove) and Config.FloatPadBypass then
         SafePad.CFrame = root.CFrame * CFrame.new(0, -3.35, 0)
     else
         SafePad.CFrame = CFrame.new(0, -9999, 0)
@@ -1635,7 +1789,8 @@ RunService.Heartbeat:Connect(function()
 end)
 
 RunService.Stepped:Connect(function()
-    if Config.Noclip or State.IsGliding or Config.AutoFarmMove then
+    -- Hanya Noclip saat sedang terbang meluncur; saat mencet telur kolisi harus ON agar server menerima interaksi!
+    if Config.Noclip or (State.IsGliding and not State.IsPressingEgg) then
         setNoclipMode(true)
     end
 end)
@@ -1647,13 +1802,25 @@ UserInputService.JumpRequest:Connect(function()
     end
 end)
 
-ProximityPromptService.PromptShown:Connect(function(pr)
-    if Config.InstantPrompt then
-        pr.HoldDuration = 0
+-- Loop Aura Grab (Jika pemain ingin jalan manual tapi tombol pencet otomatis bekerja saat dekat telur)
+task.spawn(function()
+    while task.wait(0.15) do
+        if Config.HyperPressAlwaysOn and not Config.AutoFarmMove then
+            pcall(function()
+                if State.ActivePromptShown then
+                    local pr = State.ActivePromptShown
+                    pr.RequiresLineOfSight = false
+                    pcall(function() pr:InputHoldBegin() end)
+                    if fireproximityprompt then
+                        pcall(function() fireproximityprompt(pr) end)
+                    end
+                    tapAllVisibleInteractButtons()
+                end
+            end)
+        end
     end
 end)
 
--- Fungsi Pemilihan Target Egg Terbaik (Bebas dari Plot Orang Lain)
 local function selectBestWildEgg(rootPos)
     refreshEggCache()
     local chosenArea = RarityAreas[Config.SelectedAreaIndex]
@@ -1687,81 +1854,49 @@ local function selectBestWildEgg(rootPos)
     return bestEgg, chosenArea
 end
 
--- Loop Utama (Mendukung Mode Karakter Diam & Mode Auto Steal Cepat)
+-- Loop Utama Auto Steal + 6-Layer Hyper-Press
 task.spawn(function()
-    while task.wait(0.22) do
-        if not State.AdminDetected then
-            -- MODE 1: AUTO COLLECT EGG KARAKTER DIAM (STATIONARY)
-            if Config.StationaryCollect then
-                pcall(function()
-                    local char = LocalPlayer.Character
-                    local root = char and char:FindFirstChild("HumanoidRootPart")
-                    if not root then return end
+    while task.wait(0.25) do
+        if Config.AutoFarmMove and not State.AdminDetected then
+            pcall(function()
+                local char = LocalPlayer.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if not root or not hum or hum.Health <= 0 then return end
 
-                    local bestEgg = selectBestWildEgg(root.Position)
-                    if bestEgg and bestEgg.Part then
-                        LiveStatus.Text = string.format("Collect Diam: Mengambil [%s] %s", bestEgg.Tag, bestEgg.Object.Name)
-                        collectEggWhileStandingStill(bestEgg)
-                        task.wait(0.25)
-                    else
-                        LiveStatus.Text = "Collect Diam Aktif: Menunggu Wild Egg baru spawn..."
+                local bestEgg, chosenArea = selectBestWildEgg(root.Position)
+                if bestEgg and bestEgg.Part then
+                    State.CycleCount = State.CycleCount + 1
+                    LiveStatus.Text = string.format("Menuju [%s] %s...", bestEgg.Tag, bestEgg.Object.Name)
+
+                    -- 1. Terbang ke depan telur
+                    local approachPos = bestEgg.Part.Position + Vector3.new(0, 1.5, 2.2)
+                    moveCharacterTo(CFrame.lookAt(approachPos, bestEgg.Part.Position), Config.InstantSnapToEgg)
+
+                    -- 2. Eksekusi 6-Layer Hyper-Press (Kamera AimLock + Berhenti Diam + UI Tap + Hold + Remote)
+                    executeHyperPressGrab(bestEgg)
+
+                    -- 3. Bawa pulang ke Base & Setor
+                    if Config.AutoFarmMove then
+                        depositCarriedEggToBase()
                     end
-                end)
-
-            -- MODE 2: AUTO STEAL BERGERAK & LANGSUNG TELEPORT KE BASE TANPA RAGU
-            elseif Config.AutoFarmMove then
-                pcall(function()
-                    local char = LocalPlayer.Character
-                    local root = char and char:FindFirstChild("HumanoidRootPart")
-                    local hum = char and char:FindFirstChildOfClass("Humanoid")
-                    if not root or not hum or hum.Health <= 0 then return end
-
-                    local bestEgg, chosenArea = selectBestWildEgg(root.Position)
-                    if bestEgg and bestEgg.Part then
-                        if Config.TracerBeam then
-                            AttachPlayer.WorldPosition = root.Position
-                            AttachTarget.WorldPosition = bestEgg.Part.Position
-                            TargetBeam.Color = ColorSequence.new(bestEgg.Color)
-                            TargetBeam.Enabled = true
+                else
+                    local standbyCF = Config.CustomStandbyCFrame or (chosenArea.Id > 0 and State.ZoneCheckpoints[chosenArea.Id])
+                    if Config.AutoStandbyInArea and standbyCF then
+                        if (root.Position - standbyCF.Position).Magnitude > 30 then
+                            LiveStatus.Text = "Naik ke " .. chosenArea.ShortName .. " (Memuat Area)..."
+                            moveCharacterTo(standbyCF, false)
                         else
-                            TargetBeam.Enabled = false
-                        end
-
-                        State.CycleCount = State.CycleCount + 1
-                        LiveStatus.Text = string.format("Ambil #%d: [%s] %s", State.CycleCount, bestEgg.Tag, bestEgg.Object.Name)
-
-                        -- 1. Hampiri Telur Liar
-                        moveCharacterTo(bestEgg.Part.CFrame + Vector3.new(0, 2.0, 0), Config.InstantSnapToEgg)
-
-                        -- 2. Tandai Cooldown & Ambil Telur Seketika
-                        State.VisitedEggs[bestEgg.Object] = tick() + Config.EggCooldownSec
-                        fireAllEggTriggers(bestEgg.Object, bestEgg.Part, root)
-                        State.CollectedCount = State.CollectedCount + 1
-                        task.wait(0.08)
-
-                        -- 3. Langsung Teleport Instan ke Base Tanpa Ragu-ragu!
-                        if Config.AutoDepositAfterGrab and Config.AutoFarmMove then
-                            instantReturnAndDepositToBase()
-                        end
-                    else
-                        TargetBeam.Enabled = false
-                        local standbyCF = Config.CustomStandbyCFrame or (chosenArea.Id > 0 and State.ZoneCheckpoints[chosenArea.Id])
-                        if Config.AutoStandbyInArea and standbyCF then
-                            if (root.Position - standbyCF.Position).Magnitude > 30 then
-                                LiveStatus.Text = "Menuju " .. chosenArea.ShortName .. " (Memuat Area)..."
-                                moveCharacterTo(standbyCF, false)
-                            else
-                                LiveStatus.Text = "Standby di " .. chosenArea.ShortName .. " (Menunggu Wild Egg)..."
-                            end
+                            LiveStatus.Text = "Standby di " .. chosenArea.ShortName .. " (Menunggu Wild Egg)..."
                         end
                     end
-                end)
-            end
+                end
+            end)
         end
     end
 end)
 
--- Loop ESP Khusus Wild Egg (Tidak menampilkan telur yang ada di plot pemain lain)
+-- Loop ESP Wild Egg
 task.spawn(function()
     while task.wait(0.8) do
         if Config.ESP then
@@ -1771,18 +1906,18 @@ task.spawn(function()
                 for _, item in ipairs(State.EggCache) do
                     local obj, part = item.Object, item.Part
                     if obj and part then
-                        if not obj:FindFirstChild("V6EggESP") then
+                        if not obj:FindFirstChild("V8EggESP") then
                             local hl = Instance.new("Highlight", obj)
-                            hl.Name = "V6EggESP"
+                            hl.Name = "V8EggESP"
                             hl.FillColor = item.Color
                             hl.OutlineColor = Color3.fromRGB(255, 255, 255)
                             hl.FillTransparency = 0.38
                         end
 
-                        local tag = part:FindFirstChild("V6EggTag")
+                        local tag = part:FindFirstChild("V8EggTag")
                         if not tag then
                             tag = Instance.new("BillboardGui", part)
-                            tag.Name = "V6EggTag"
+                            tag.Name = "V8EggTag"
                             tag.Size = UDim2.new(0, 150, 0, 36)
                             tag.StudsOffset = Vector3.new(0, 3.2, 0)
                             tag.AlwaysOnTop = true
@@ -1813,4 +1948,4 @@ LocalPlayer.Idled:Connect(function()
     end
 end)
 
-sendNotification("Anime Overdrive V6 Pro", "Anti-Plot Orang & Collect Diam Siap!", 3.5)
+sendNotification("Anime Overdrive V8 Ready", "6-Layer Hyper-Press Engine siap digunakan!", 3.5)
